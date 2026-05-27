@@ -137,7 +137,77 @@ def last_transcribed_time(txt_path):
     return float(last)
 
 
-def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0):
+def assign_speakers(segments, turns):
+    """Assegna a ogni segmento la voce con massima sovrapposizione temporale.
+    turns: lista di (start, end, label). Ritorna i segmenti con chiave 'speaker'."""
+    out = []
+    for seg in segments:
+        best_label, best_overlap = None, 0.0
+        for t_start, t_end, label in turns:
+            overlap = min(seg["end"], t_end) - max(seg["start"], t_start)
+            if overlap > best_overlap:
+                best_overlap, best_label = overlap, label
+        out.append({**seg, "speaker": best_label})
+    return out
+
+
+def speaker_label_map(segments):
+    """SPEAKER_xx -> 'Interlocutore N' in ordine di prima comparsa."""
+    mapping = {}
+    for seg in segments:
+        spk = seg.get("speaker")
+        if spk and spk not in mapping:
+            mapping[spk] = f"Interlocutore {len(mapping) + 1}"
+    return mapping
+
+
+def format_line(seg, label_map):
+    """Formatta una riga: [mm:ss - mm:ss] [Etichetta: ]testo."""
+    s, e = seg["start"], seg["end"]
+    ts = f"[{int(s // 60):02d}:{int(s % 60):02d} - {int(e // 60):02d}:{int(e % 60):02d}]"
+    text = seg["text"].strip()
+    spk = seg.get("speaker")
+    if spk and spk in label_map:
+        return f"{ts} {label_map[spk]}: {text}"
+    return f"{ts} {text}"
+
+
+def diarize(audio_path, num_speakers=None, on_status=None):
+    """Diarization offline su CPU. Ritorna [(start, end, label)].
+
+    Usa pyannote 4.x. L'audio viene caricato in memoria col ffmpeg di whisper
+    (evita torchcodec). I modelli sono caricati dalla cache locale (offline);
+    nella build congelata stanno in 'hf_models/' dentro il bundle.
+    """
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    if getattr(sys, "frozen", False):
+        base = getattr(sys, "_MEIPASS", get_base_path())
+        bundled = os.path.join(base, "hf_models")
+        if os.path.isdir(bundled):
+            os.environ["HF_HOME"] = bundled
+    if on_status:
+        on_status("Riconoscimento voci...")
+
+    import torch
+    import whisper.audio
+    from pyannote.audio import Pipeline
+
+    pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+    pipe.to(torch.device("cpu"))
+
+    audio = whisper.audio.load_audio(audio_path)  # float32 mono @ 16 kHz
+    waveform = torch.from_numpy(audio).unsqueeze(0)
+    call_kwargs = {}
+    if num_speakers:
+        call_kwargs["num_speakers"] = int(num_speakers)
+    dia = pipe({"waveform": waveform, "sample_rate": 16000}, **call_kwargs)
+    ann = dia.speaker_diarization
+    return [(t.start, t.end, label) for t, _, label in ann.itertracks(yield_label=True)]
+
+
+def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
+               diarize_on=False, num_speakers=None):
     on_status, on_progress, on_segment, on_done = ui_callbacks
 
     if not check_ffmpeg():
@@ -287,6 +357,20 @@ def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0):
         except Exception:
             pass
 
+    # Riconoscimento dei parlanti (opzionale): pyannote analizza tutto l'audio,
+    # poi riscriviamo il file con le etichette e ricarichiamo la finestra.
+    if diarize_on:
+        try:
+            turns = diarize(audio_path, num_speakers=num_speakers, on_status=on_status)
+            segs = assign_speakers(result["segments"], turns)
+            label_map = speaker_label_map(segs)
+            with open(out_path, "w", encoding="utf-8") as f:
+                for seg in segs:
+                    f.write(format_line(seg, label_map) + "\n")
+            on_segment("__RELOAD__")
+        except Exception as e:
+            on_status(f"Voci non riconosciute: {e}")
+
     # Il file è già stato scritto in modo incrementale durante la trascrizione.
     elapsed = time.time() - start_time
     detected = result.get("language", "?")
@@ -345,6 +429,25 @@ class App:
                            bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
                            activebackground=CARA_BLU, activeforeground=CARA_ORO,
                            highlightthickness=0).pack(side="left", padx=(10, 0))
+
+        diar_row = tk.Frame(frame, bg=CARA_BLU)
+        diar_row.pack(fill="x", pady=(0, 10))
+        self.diar_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(diar_row, text="Riconosci chi parla (più lento)",
+                       variable=self.diar_var, font=("Arial", 9),
+                       bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
+                       activebackground=CARA_BLU, activeforeground=CARA_ORO,
+                       highlightthickness=0).pack(side="left")
+        tk.Label(diar_row, text="Voci attese:", font=("Arial", 9),
+                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left", padx=(12, 4))
+        self.speakers_var = tk.StringVar(value="auto")
+        ttk.Combobox(diar_row, textvariable=self.speakers_var, width=5, state="readonly",
+                     values=["auto", "2", "3", "4", "5", "6"]).pack(side="left")
+        self.rename_btn = tk.Button(diar_row, text="Rinomina voci", command=self.rename_speakers,
+                                    font=("Arial", 9), bg=CARA_BLU_SCURO, fg=CARA_TXT,
+                                    activebackground=CARA_ORO, activeforeground=CARA_BLU,
+                                    relief="flat", state="disabled")
+        self.rename_btn.pack(side="right")
 
         btn_row = tk.Frame(frame, bg=CARA_BLU)
         btn_row.pack(fill="x", pady=(0, 10))
@@ -471,6 +574,18 @@ class App:
 
     def add_segment(self, line):
         def update():
+            if line == "__RELOAD__":
+                # ricarica il file (ora con le etichette dei parlanti)
+                self.transcript.config(state="normal")
+                self.transcript.delete("1.0", "end")
+                try:
+                    with open(self._current_out, "r", encoding="utf-8") as f:
+                        self.transcript.insert("end", f.read())
+                except Exception:
+                    pass
+                self.transcript.see("end")
+                self.transcript.config(state="disabled")
+                return
             self.transcript.config(state="normal")
             self.transcript.insert("end", line + "\n")
             self.transcript.see("end")
@@ -493,6 +608,11 @@ class App:
         self.progress["value"] = 0
 
         model_name = self.model_var.get()
+        self._current_out = os.path.splitext(path)[0] + ".txt"
+        diarize_on = self.diar_var.get()
+        sp = self.speakers_var.get()
+        num_speakers = None if sp == "auto" else int(sp)
+        self.rename_btn.config(state="disabled")
 
         def on_status(msg):
             self.root.after(0, lambda: self.status.config(text=msg, fg=COL_INFO))
@@ -523,6 +643,8 @@ class App:
                     self.progress["value"] = 100
                     self.status.config(text=f"Fatto! {info}", fg=COL_OK)
                     self.pct_label.config(text="100%")
+                    if "Interlocutore" in self.transcript.get("1.0", "end"):
+                        self.rename_btn.config(state="normal")
                     messagebox.showinfo("Sbobinator", f"Trascrizione salvata in:\n{result}")
                 else:
                     self.progress["value"] = 0
@@ -532,8 +654,52 @@ class App:
             self.root.after(0, update)
 
         callbacks = (on_status, on_progress, on_segment, on_done)
-        t = threading.Thread(target=transcribe, args=(path, model_name, callbacks, resume_from), daemon=True)
+        t = threading.Thread(target=transcribe,
+                             args=(path, model_name, callbacks, resume_from, diarize_on, num_speakers),
+                             daemon=True)
         t.start()
+
+    def rename_speakers(self):
+        import re
+        text = self.transcript.get("1.0", "end")
+        found = sorted(set(re.findall(r"Interlocutore \d+", text)),
+                       key=lambda s: int(s.split()[1]))
+        if not found:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Rinomina voci")
+        win.configure(bg=CARA_BLU)
+        entries = {}
+        for i, name in enumerate(found):
+            tk.Label(win, text=name + "  →", bg=CARA_BLU, fg=CARA_TXT,
+                     font=("Arial", 10)).grid(row=i, column=0, padx=8, pady=4, sticky="e")
+            entry = tk.Entry(win, width=24)
+            entry.grid(row=i, column=1, padx=8, pady=4)
+            entries[name] = entry
+
+        def apply():
+            mapping = {old: e.get().strip() for old, e in entries.items() if e.get().strip()}
+            if mapping:
+                try:
+                    with open(self._current_out, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    for old, new in mapping.items():
+                        content = content.replace(old + ":", new + ":")
+                    with open(self._current_out, "w", encoding="utf-8") as f:
+                        f.write(content)
+                except Exception:
+                    pass
+                self.transcript.config(state="normal")
+                box = self.transcript.get("1.0", "end")
+                for old, new in mapping.items():
+                    box = box.replace(old + ":", new + ":")
+                self.transcript.delete("1.0", "end")
+                self.transcript.insert("end", box.rstrip("\n") + "\n")
+                self.transcript.config(state="disabled")
+            win.destroy()
+
+        tk.Button(win, text="Applica", command=apply, bg=CARA_ROSSO, fg="white",
+                  relief="flat").grid(row=len(found), column=0, columnspan=2, pady=10)
 
 
 def main():
