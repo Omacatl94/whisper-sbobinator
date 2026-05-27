@@ -447,7 +447,13 @@ def main():
 
     root = tk.Tk()
     App(root)
+    # Chiusura pulita: alla X termina tutto, e os._exit forza la fine completa
+    # del processo (e del processo figlio creato da PyInstaller "onefile"),
+    # così non restano processi orfani/ghost anche se una trascrizione è in
+    # corso al momento della chiusura.
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
     root.mainloop()
+    os._exit(0)
 
 
 if __name__ == "__main__":
