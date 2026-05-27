@@ -9,10 +9,31 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# In una build PyInstaller "windowed" (console=False) sys.stdout e sys.stderr
+# valgono None. whisper/tqdm ci scrivono sopra durante la trascrizione e l'app
+# crasha con "NoneType object has no attribute 'write'". Reindirizziamo i
+# flussi mancanti su devnull così ogni scrittura va a vuoto senza errori.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 MODEL_INFO = {
     "medium": {"label": "Medium (~1.5GB, più veloce)", "file": "medium.pt", "size_gb": 1.5},
     "large": {"label": "Large (~3GB, più preciso, dialetti)", "file": "large-v3.pt", "size_gb": 2.9},
 }
+
+# --- Tema "Carabinieri" ---
+CARA_BLU = "#0a1f44"        # blu uniforme
+CARA_BLU_SCURO = "#06152e"  # blu piu' scuro (sfondi incassati)
+CARA_ROSSO = "#c8102e"      # rosso banda
+CARA_ORO = "#caa84a"        # oro fiamma
+CARA_TXT = "#eef2f8"        # testo chiaro
+COL_OK = "#36d399"
+COL_WARN = "#fbbd23"
+COL_ERR = "#ff6b6b"
+COL_INFO = "#5fa8ff"
+COL_MUTED = "#9fb0c8"
 
 
 def get_base_path():
@@ -178,55 +199,86 @@ def transcribe(audio_path, model_name, ui_callbacks):
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Sbobinator")
-        self.root.geometry("600x550")
+        self.root.title("Sbobinator — Comando Trascrizioni")
+        self.root.geometry("600x600")
         self.root.resizable(False, False)
+        self.root.configure(bg=CARA_BLU)
 
-        frame = tk.Frame(root, padx=20, pady=15)
+        # Stile Carabinieri per i widget ttk (barra di avanzamento)
+        style = ttk.Style()
+        try:
+            style.theme_use("default")
+        except tk.TclError:
+            pass
+        style.configure("Cara.Horizontal.TProgressbar",
+                        troughcolor=CARA_BLU_SCURO, background=CARA_ROSSO,
+                        bordercolor=CARA_ORO, lightcolor=CARA_ROSSO, darkcolor=CARA_ROSSO)
+
+        frame = tk.Frame(root, padx=20, pady=15, bg=CARA_BLU)
         frame.pack(fill="both", expand=True)
 
-        tk.Label(frame, text="Sbobinator", font=("Arial", 18, "bold")).pack(pady=(0, 3))
-        tk.Label(frame, text="Trascrittore audio locale", font=("Arial", 9), fg="gray").pack(pady=(0, 12))
+        # Banda tricolore dei gradi (oro/rosso) in alto
+        banda = tk.Frame(frame, bg=CARA_BLU)
+        banda.pack(fill="x", pady=(0, 8))
+        tk.Frame(banda, bg=CARA_ROSSO, height=4).pack(fill="x")
+
+        tk.Label(frame, text="🔥  S B O B I N A T O R  🔥", font=("Arial", 18, "bold"),
+                 fg=CARA_ORO, bg=CARA_BLU).pack(pady=(0, 2))
+        tk.Label(frame, text="Trascrittore audio locale — per il Comando locale",
+                 font=("Arial", 9), fg=CARA_TXT, bg=CARA_BLU).pack(pady=(0, 1))
+        tk.Label(frame, text="⚜  Nei secoli fedele  ⚜", font=("Arial", 9, "italic"),
+                 fg=CARA_ROSSO, bg=CARA_BLU).pack(pady=(0, 12))
 
         self.model_var = tk.StringVar(value="medium")
 
-        self.model_status = tk.Label(frame, text="", font=("Arial", 9))
+        self.model_status = tk.Label(frame, text="", font=("Arial", 9), bg=CARA_BLU)
         self.model_status.pack(pady=(0, 5))
         self.check_models()
 
-        row = tk.Frame(frame)
+        row = tk.Frame(frame, bg=CARA_BLU)
         row.pack(fill="x", pady=(0, 10))
-        tk.Label(row, text="Modello:", font=("Arial", 10)).pack(side="left")
+        tk.Label(row, text="Modello:", font=("Arial", 10), fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
         for name, info in MODEL_INFO.items():
             tk.Radiobutton(row, text=info["label"], variable=self.model_var, value=name,
-                           font=("Arial", 9), command=self.check_models).pack(side="left", padx=(10, 0))
+                           font=("Arial", 9), command=self.check_models,
+                           bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
+                           activebackground=CARA_BLU, activeforeground=CARA_ORO,
+                           highlightthickness=0).pack(side="left", padx=(10, 0))
 
-        btn_row = tk.Frame(frame)
+        btn_row = tk.Frame(frame, bg=CARA_BLU)
         btn_row.pack(fill="x", pady=(0, 10))
 
         self.btn = tk.Button(btn_row, text="Seleziona file audio", command=self.pick_file,
-                             height=2, font=("Arial", 11))
+                             height=2, font=("Arial", 11, "bold"),
+                             bg=CARA_ROSSO, fg="white", activebackground=CARA_ORO,
+                             activeforeground=CARA_BLU, relief="flat", cursor="hand2")
         self.btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
 
         self.dl_btn = tk.Button(btn_row, text="Scarica\nmodello", command=self.download_model_ui,
-                                height=2, font=("Arial", 9), width=10)
+                                height=2, font=("Arial", 9), width=10,
+                                bg=CARA_BLU_SCURO, fg=CARA_TXT, activebackground=CARA_ORO,
+                                activeforeground=CARA_BLU, relief="flat", cursor="hand2")
         self.dl_btn.pack(side="right")
 
-        self.status = tk.Label(frame, text="Pronto", font=("Arial", 10), fg="gray")
+        self.status = tk.Label(frame, text="Pronto", font=("Arial", 10), fg=COL_MUTED, bg=CARA_BLU)
         self.status.pack(pady=(0, 5))
 
-        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100)
+        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100,
+                                        style="Cara.Horizontal.TProgressbar")
         self.progress.pack(fill="x", pady=(0, 5))
 
-        self.pct_label = tk.Label(frame, text="", font=("Arial", 9), fg="gray")
+        self.pct_label = tk.Label(frame, text="", font=("Arial", 9), fg=COL_MUTED, bg=CARA_BLU)
         self.pct_label.pack(pady=(0, 10))
 
-        tk.Label(frame, text="Trascrizione live:", font=("Arial", 9, "bold"), anchor="w").pack(fill="x")
-        text_frame = tk.Frame(frame)
+        tk.Label(frame, text="Trascrizione live:", font=("Arial", 9, "bold"), anchor="w",
+                 fg=CARA_TXT, bg=CARA_BLU).pack(fill="x")
+        text_frame = tk.Frame(frame, bg=CARA_BLU)
         text_frame.pack(fill="both", expand=True, pady=(3, 0))
 
         self.transcript = tk.Text(text_frame, height=10, font=("Consolas", 9), wrap="word",
-                                  state="disabled", bg="#f5f5f5")
+                                  state="disabled", bg=CARA_BLU_SCURO, fg=CARA_TXT,
+                                  insertbackground=CARA_TXT, relief="flat",
+                                  highlightthickness=1, highlightbackground=CARA_ORO)
         scrollbar = ttk.Scrollbar(text_frame, command=self.transcript.yview)
         self.transcript.config(yscrollcommand=scrollbar.set)
         self.transcript.pack(side="left", fill="both", expand=True)
@@ -235,11 +287,11 @@ class App:
     def check_models(self):
         model = self.model_var.get()
         if model_exists(model):
-            self.model_status.config(text=f"✓ Modello {model} trovato", fg="green")
+            self.model_status.config(text=f"✓ Modello {model} trovato", fg=COL_OK)
         else:
             self.model_status.config(
                 text=f"✗ Modello {model} non trovato — verrà scaricato al primo uso (serve internet)",
-                fg="orange")
+                fg=COL_WARN)
 
     def download_model_ui(self):
         model_name = self.model_var.get()
@@ -262,7 +314,7 @@ class App:
             self.root.after(0, update)
 
         def do_download():
-            self.root.after(0, lambda: self.status.config(text=f"Download modello {model_name}...", fg="blue"))
+            self.root.after(0, lambda: self.status.config(text=f"Download modello {model_name}...", fg=COL_INFO))
             ok, err = download_model(model_name, on_progress)
             def finish():
                 try:
@@ -275,11 +327,11 @@ class App:
                 self.check_models()
                 if ok:
                     self.progress["value"] = 100
-                    self.status.config(text=f"Modello {model_name} scaricato!", fg="green")
+                    self.status.config(text=f"Modello {model_name} scaricato!", fg=COL_OK)
                     messagebox.showinfo("Sbobinator", f"Modello {model_name} scaricato nella cartella models/.\n\nOra puoi copiare tutta la cartella su chiavetta per l'uso offline.")
                 else:
                     self.progress["value"] = 0
-                    self.status.config(text="Errore download", fg="red")
+                    self.status.config(text="Errore download", fg=COL_ERR)
                     messagebox.showerror("Errore", f"Download fallito:\n{err}")
             self.root.after(0, finish)
 
@@ -315,7 +367,7 @@ class App:
         model_name = self.model_var.get()
 
         def on_status(msg):
-            self.root.after(0, lambda: self.status.config(text=msg, fg="blue"))
+            self.root.after(0, lambda: self.status.config(text=msg, fg=COL_INFO))
 
         def on_progress(msg, pct):
             def update():
@@ -341,12 +393,12 @@ class App:
                 self.btn.config(state="normal")
                 if success:
                     self.progress["value"] = 100
-                    self.status.config(text=f"Fatto! {info}", fg="green")
+                    self.status.config(text=f"Fatto! {info}", fg=COL_OK)
                     self.pct_label.config(text="100%")
                     messagebox.showinfo("Sbobinator", f"Trascrizione salvata in:\n{result}")
                 else:
                     self.progress["value"] = 0
-                    self.status.config(text="Errore", fg="red")
+                    self.status.config(text="Errore", fg=COL_ERR)
                     self.pct_label.config(text="")
                     messagebox.showerror("Errore", result)
             self.root.after(0, update)
