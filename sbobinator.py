@@ -200,9 +200,16 @@ class App:
             tk.Radiobutton(row, text=info["label"], variable=self.model_var, value=name,
                            font=("Arial", 9), command=self.check_models).pack(side="left", padx=(10, 0))
 
-        self.btn = tk.Button(frame, text="Seleziona file audio", command=self.pick_file,
+        btn_row = tk.Frame(frame)
+        btn_row.pack(fill="x", pady=(0, 10))
+
+        self.btn = tk.Button(btn_row, text="Seleziona file audio", command=self.pick_file,
                              height=2, font=("Arial", 11))
-        self.btn.pack(fill="x", pady=(0, 10))
+        self.btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.dl_btn = tk.Button(btn_row, text="Scarica\nmodello", command=self.download_model_ui,
+                                height=2, font=("Arial", 9), width=10)
+        self.dl_btn.pack(side="right")
 
         self.status = tk.Label(frame, text="Pronto", font=("Arial", 10), fg="gray")
         self.status.pack(pady=(0, 5))
@@ -232,6 +239,51 @@ class App:
             self.model_status.config(
                 text=f"✗ Modello {model} non trovato — verrà scaricato al primo uso (serve internet)",
                 fg="orange")
+
+    def download_model_ui(self):
+        model_name = self.model_var.get()
+        if model_exists(model_name):
+            messagebox.showinfo("Sbobinator", f"Il modello {model_name} è già scaricato!")
+            return
+
+        self.btn.config(state="disabled")
+        self.dl_btn.config(state="disabled")
+
+        def on_progress(msg, pct):
+            def update():
+                self.pct_label.config(text=msg)
+                if pct >= 0:
+                    self.progress["mode"] = "determinate"
+                    self.progress["value"] = pct
+                else:
+                    self.progress["mode"] = "indeterminate"
+                    self.progress.start(10)
+            self.root.after(0, update)
+
+        def do_download():
+            self.root.after(0, lambda: self.status.config(text=f"Download modello {model_name}...", fg="blue"))
+            ok, err = download_model(model_name, on_progress)
+            def finish():
+                try:
+                    self.progress.stop()
+                except Exception:
+                    pass
+                self.progress["mode"] = "determinate"
+                self.btn.config(state="normal")
+                self.dl_btn.config(state="normal")
+                self.check_models()
+                if ok:
+                    self.progress["value"] = 100
+                    self.status.config(text=f"Modello {model_name} scaricato!", fg="green")
+                    messagebox.showinfo("Sbobinator", f"Modello {model_name} scaricato nella cartella models/.\n\nOra puoi copiare tutta la cartella su chiavetta per l'uso offline.")
+                else:
+                    self.progress["value"] = 0
+                    self.status.config(text="Errore download", fg="red")
+                    messagebox.showerror("Errore", f"Download fallito:\n{err}")
+            self.root.after(0, finish)
+
+        t = threading.Thread(target=do_download, daemon=True)
+        t.start()
 
     def pick_file(self):
         path = filedialog.askopenfilename(

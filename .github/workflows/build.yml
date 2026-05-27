@@ -30,29 +30,15 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination dist/ffmpeg.exe
         shell: pwsh
 
-      - name: Download medium model
-        run: |
-          mkdir dist\models
-          curl -L -o dist/models/medium.pt https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt
-
       - name: Create bundle zip
         run: |
           cd dist
-          7z a -mx1 ../Sbobinator-Bundle.zip Sbobinator.exe ffmpeg.exe models/
+          7z a ../Sbobinator.zip Sbobinator.exe ffmpeg.exe
         shell: pwsh
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: Sbobinator-Bundle
-          path: Sbobinator-Bundle.zip
-          retention-days: 30
-
-      - name: Upload exe only (senza modello)
-        uses: actions/upload-artifact@v4
-        with:
-          name: Sbobinator-ExeOnly
-          path: |
-            dist/Sbobinator.exe
-            dist/ffmpeg.exe
+          name: Sbobinator
+          path: Sbobinator.zip
           retention-days: 30
