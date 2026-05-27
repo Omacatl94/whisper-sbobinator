@@ -8,6 +8,8 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -42,3 +44,9 @@ jobs:
           name: Sbobinator
           path: Sbobinator.zip
           retention-days: 30
+
+      - name: Publish to release v1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload v1.0 Sbobinator.zip --clobber
+        shell: pwsh

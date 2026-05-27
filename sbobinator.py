@@ -153,7 +153,7 @@ def transcribe(audio_path, model_name, ui_callbacks):
             for seg in result["segments"]:
                 start = seg["start"]
                 end = seg["end"]
-                m1, s1 = int(start // 60), int(end % 60)
+                m1, s1 = int(start // 60), int(start % 60)
                 m2, s2 = int(end // 60), int(end % 60)
                 text = seg["text"].strip()
                 line = f"[{m1:02d}:{s1:02d} - {m2:02d}:{s2:02d}] {text}"
@@ -188,6 +188,8 @@ class App:
         tk.Label(frame, text="Sbobinator", font=("Arial", 18, "bold")).pack(pady=(0, 3))
         tk.Label(frame, text="Trascrittore audio locale", font=("Arial", 9), fg="gray").pack(pady=(0, 12))
 
+        self.model_var = tk.StringVar(value="medium")
+
         self.model_status = tk.Label(frame, text="", font=("Arial", 9))
         self.model_status.pack(pady=(0, 5))
         self.check_models()
@@ -195,7 +197,6 @@ class App:
         row = tk.Frame(frame)
         row.pack(fill="x", pady=(0, 10))
         tk.Label(row, text="Modello:", font=("Arial", 10)).pack(side="left")
-        self.model_var = tk.StringVar(value="medium")
         for name, info in MODEL_INFO.items():
             tk.Radiobutton(row, text=info["label"], variable=self.model_var, value=name,
                            font=("Arial", 9), command=self.check_models).pack(side="left", padx=(10, 0))
