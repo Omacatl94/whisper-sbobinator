@@ -117,7 +117,27 @@ def download_model(model_name, progress_callback):
         return False, str(e)
 
 
-def transcribe(audio_path, model_name, ui_callbacks):
+def last_transcribed_time(txt_path):
+    """Secondi dell'ultimo segmento salvato in un .txt (per riprendere), o 0."""
+    last = 0.0
+    try:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("[") and "]" in line and " - " in line:
+                    try:
+                        inside = line[1:line.index("]")]
+                        _, end = inside.split(" - ")
+                        mm, ss = end.split(":")
+                        last = int(mm) * 60 + int(ss)
+                    except Exception:
+                        pass
+    except Exception:
+        return 0.0
+    return float(last)
+
+
+def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0):
     on_status, on_progress, on_segment, on_done = ui_callbacks
 
     if not check_ffmpeg():
@@ -147,15 +167,109 @@ def transcribe(audio_path, model_name, ui_callbacks):
         on_done(False, "Impossibile leggere il file audio.\n\nFormato non supportato o file corrotto.", None)
         return
 
-    on_status("Sbobinatura in corso...")
-    on_progress("Sbobinatura...", 0)
+    out_path = os.path.splitext(audio_path)[0] + ".txt"
+
+    if resume_from > 0:
+        on_status(f"Riprendo da {int(resume_from // 60):02d}:{int(resume_from % 60):02d}...")
+    else:
+        on_status("Sbobinatura in corso...")
+    on_progress("Sbobinatura...", (min(99.0, resume_from / duration * 100) if duration else 0))
 
     start_time = time.time()
 
+    # --- Live vera + salvataggio progressivo ---
+    # Whisper non espone callback: agganciamo la sua barra interna (tqdm) per la
+    # percentuale reale e catturiamo l'output di verbose=True per i segmenti, che
+    # vengono mostrati E scritti su file man mano (un crash non perde il lavoro
+    # fatto). Con resume_from si riparte da un punto e si accoda al file.
+    # Nota: whisper.transcribe (attributo) è la FUNZIONE, non il modulo (per via
+    # di "from .transcribe import transcribe" in __init__). Prendiamo il modulo
+    # vero per poterne sostituire il tqdm interno.
+    import importlib
+    _wt = importlib.import_module("whisper.transcribe")
+
+    frames_per_second = 100  # whisper: SAMPLE_RATE / HOP_LENGTH
+    resume_frames = int(resume_from * frames_per_second)
+
+    def _ts_to_sec(ts):
+        sec = 0.0
+        for part in ts.split(":"):
+            sec = sec * 60 + float(part)
+        return sec
+
+    class _ProgressTqdm:
+        def __init__(self, *args, total=None, **kwargs):
+            self.total = total or 0
+            self.n = resume_frames
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, n=1):
+            self.n += n
+            if self.total:
+                on_progress("Sbobinatura...", min(99.0, self.n / self.total * 100))
+
+        def close(self):
+            pass
+
+    class _FakeTqdmModule:
+        tqdm = _ProgressTqdm
+
     try:
-        result = whisper.transcribe(
-            model, audio_path, language=None, fp16=False, verbose=False,
-        )
+        out_file = open(out_path, "a" if resume_from > 0 else "w", encoding="utf-8")
+    except Exception as e:
+        on_done(False, f"Non riesco a scrivere il file:\n{out_path}\n\nControlla i permessi della cartella.\n\n{e}", None)
+        return
+
+    class _SegmentCapture:
+        encoding = "utf-8"
+
+        def __init__(self):
+            self._buf = ""
+
+        def write(self, s):
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                self._emit(line)
+            return len(s)
+
+        def _emit(self, line):
+            line = line.strip()
+            if not line.startswith("["):
+                return
+            try:
+                inside, text = line[1:].split("]", 1)
+                t1, t2 = inside.split(" --> ")
+                s, e = _ts_to_sec(t1), _ts_to_sec(t2)
+                line = f"[{int(s // 60):02d}:{int(s % 60):02d} - {int(e // 60):02d}:{int(e % 60):02d}] {text.strip()}"
+            except Exception:
+                pass
+            # salvataggio progressivo: scrivi e svuota subito su disco
+            try:
+                out_file.write(line + "\n")
+                out_file.flush()
+            except Exception:
+                pass
+            on_segment(line)
+
+        def flush(self):
+            pass
+
+    transcribe_kwargs = dict(language=None, fp16=False, verbose=True)
+    if resume_from > 0:
+        transcribe_kwargs["clip_timestamps"] = [float(resume_from)]
+
+    real_stdout = sys.stdout
+    orig_tqdm = _wt.tqdm
+    sys.stdout = _SegmentCapture()
+    _wt.tqdm = _FakeTqdmModule
+    try:
+        result = whisper.transcribe(model, audio_path, **transcribe_kwargs)
     except RuntimeError as e:
         if "out of memory" in str(e).lower() or "memory" in str(e).lower():
             on_done(False, "Memoria insufficiente!\n\nProva col modello Medium che è più leggero.", None)
@@ -165,28 +279,15 @@ def transcribe(audio_path, model_name, ui_callbacks):
     except Exception as e:
         on_done(False, f"Errore durante la sbobinatura:\n{e}", None)
         return
+    finally:
+        sys.stdout = real_stdout
+        _wt.tqdm = orig_tqdm
+        try:
+            out_file.close()
+        except Exception:
+            pass
 
-    on_status("Salvataggio trascrizione...")
-    out_path = os.path.splitext(audio_path)[0] + ".txt"
-
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            for seg in result["segments"]:
-                start = seg["start"]
-                end = seg["end"]
-                m1, s1 = int(start // 60), int(start % 60)
-                m2, s2 = int(end // 60), int(end % 60)
-                text = seg["text"].strip()
-                line = f"[{m1:02d}:{s1:02d} - {m2:02d}:{s2:02d}] {text}"
-                f.write(line + "\n")
-                on_segment(line)
-    except PermissionError:
-        on_done(False, f"Non riesco a scrivere il file:\n{out_path}\n\nControlla i permessi della cartella.", None)
-        return
-    except Exception as e:
-        on_done(False, f"Errore salvataggio:\n{e}", None)
-        return
-
+    # Il file è già stato scritto in modo incrementale durante la trascrizione.
     elapsed = time.time() - start_time
     detected = result.get("language", "?")
     mins = int(elapsed // 60)
@@ -346,8 +447,27 @@ class App:
                 ("Tutti i file", "*.*"),
             ],
         )
-        if path:
-            self.start_transcription(path)
+        if not path:
+            return
+
+        resume_from = 0.0
+        out_path = os.path.splitext(path)[0] + ".txt"
+        if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
+            last = last_transcribed_time(out_path)
+            if last > 0:
+                ans = messagebox.askyesnocancel(
+                    "Sbobinator",
+                    f"Esiste già una trascrizione per questo audio, arrivata a "
+                    f"{int(last // 60):02d}:{int(last % 60):02d}.\n\n"
+                    "Sì = riprendi da lì\n"
+                    "No = ricomincia da capo\n"
+                    "Annulla = lascia stare",
+                )
+                if ans is None:
+                    return
+                resume_from = last if ans else 0.0
+
+        self.start_transcription(path, resume_from)
 
     def add_segment(self, line):
         def update():
@@ -357,10 +477,18 @@ class App:
             self.transcript.config(state="disabled")
         self.root.after(0, update)
 
-    def start_transcription(self, path):
+    def start_transcription(self, path, resume_from=0.0):
         self.btn.config(state="disabled")
         self.transcript.config(state="normal")
         self.transcript.delete("1.0", "end")
+        if resume_from > 0:
+            # mostra ciò che era già stato trascritto, poi si accoda il resto
+            try:
+                with open(os.path.splitext(path)[0] + ".txt", "r", encoding="utf-8") as f:
+                    self.transcript.insert("end", f.read())
+            except Exception:
+                pass
+            self.transcript.see("end")
         self.transcript.config(state="disabled")
         self.progress["value"] = 0
 
@@ -404,7 +532,7 @@ class App:
             self.root.after(0, update)
 
         callbacks = (on_status, on_progress, on_segment, on_done)
-        t = threading.Thread(target=transcribe, args=(path, model_name, callbacks), daemon=True)
+        t = threading.Thread(target=transcribe, args=(path, model_name, callbacks, resume_from), daemon=True)
         t.start()
 
 
