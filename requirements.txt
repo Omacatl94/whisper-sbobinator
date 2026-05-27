@@ -1,2 +1,4 @@
 openai-whisper
 tkinter-dnd2
+pyannote.audio==4.0.4
+torchaudio

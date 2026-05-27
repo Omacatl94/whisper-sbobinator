@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install openai-whisper pyinstaller tiktoken
+          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" torchaudio
 
       - name: Build EXE
         run: pyinstaller sbobinator.spec
