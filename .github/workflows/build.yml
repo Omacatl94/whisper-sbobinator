@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio torchvision
-          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" sounddevice soundfile "transformers>=4.54" accelerate "mistral_common[audio]"
+          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" sounddevice soundfile
 
       - name: Build EXE
         run: pyinstaller sbobinator.spec
@@ -36,18 +36,18 @@ jobs:
       - name: Create bundle zip
         run: |
           cd dist
-          7z a ../Sbobinator.zip Sbobinator.exe ffmpeg.exe
+          7z a ../verbaLIA.zip verbaLIA.exe ffmpeg.exe
         shell: pwsh
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
-          name: Sbobinator
-          path: Sbobinator.zip
+          name: verbaLIA
+          path: verbaLIA.zip
           retention-days: 30
 
       - name: Publish to release v1.0
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload v1.0 Sbobinator.zip --clobber
+        run: gh release upload v1.0 verbaLIA.zip --clobber
         shell: pwsh

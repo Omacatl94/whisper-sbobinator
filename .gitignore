@@ -14,3 +14,7 @@ build_v3/
 archive_v3.txt
 *.selftest.log
 *.cleaned.wav
+*.normalized.wav
+dist_dev/
+build_dev/
+verbalia_debug.log

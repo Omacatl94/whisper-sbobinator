@@ -19,7 +19,6 @@ for pkg in [
     'asteroid_filterbanks', 'torch_audiomentations',
     'pytorch_lightning', 'lightning_fabric', 'lightning',
     'speechbrain', 'huggingface_hub',
-    'transformers', 'accelerate', 'mistral_common',
     'soundfile', 'sounddevice',
 ]:
     try:
@@ -48,7 +47,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Sbobinator',
+    name='verbaLIA',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -63,5 +62,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name='Sbobinator',
+    name='verbaLIA',
 )

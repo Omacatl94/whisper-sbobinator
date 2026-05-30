@@ -21,7 +21,6 @@ for pkg in [
     'asteroid_filterbanks', 'torch_audiomentations',
     'pytorch_lightning', 'lightning_fabric', 'lightning',
     'speechbrain', 'huggingface_hub',
-    'transformers', 'accelerate', 'mistral_common',
     'soundfile', 'sounddevice',
 ]:
     try:
@@ -51,7 +50,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Sbobinator',
+    name='verbaLIA',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

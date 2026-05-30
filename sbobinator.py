@@ -58,39 +58,29 @@ if sys.stderr is None:
 
 # Frozen: niente più chdir/TORCH_HOME (era per ClearVoice/DNS64, droppati)
 
-MODEL_INFO = {
-    "medium": {
-        "engine": "whisper",
-        "label": "Whisper Medium (~1.5GB, veloce)",
-        "file": "medium.pt",
-        "size_gb": 1.5,
-    },
-    "large": {
-        "engine": "whisper",
-        "label": "Whisper Large-v3 (~3GB, dialetti)",
-        "file": "large-v3.pt",
-        "size_gb": 2.9,
-    },
-    "voxtral-mini": {
-        "engine": "voxtral",
-        "label": "Voxtral Mini 3B (~6GB, top forense)",
-        "hf_id": "mistralai/Voxtral-Mini-3B-2507",
-        "folder": "voxtral-mini-3b",
-        "size_gb": 6.0,
-    },
-}
+MODEL_NAME = "large"
+MODEL_FILE = "large-v3.pt"
+MODEL_URL = "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt"
+MODEL_SIZE_GB = 2.9
 
-# --- Tema "Carabinieri" ---
-CARA_BLU = "#0a1f44"        # blu uniforme
-CARA_BLU_SCURO = "#06152e"  # blu piu' scuro (sfondi incassati)
-CARA_ROSSO = "#c8102e"      # rosso banda
-CARA_ORO = "#caa84a"        # oro fiamma
-CARA_TXT = "#eef2f8"        # testo chiaro
-COL_OK = "#36d399"
-COL_WARN = "#fbbd23"
-COL_ERR = "#ff6b6b"
-COL_INFO = "#5fa8ff"
-COL_MUTED = "#9fb0c8"
+APP_NAME = "verbaLIA"
+APP_SUBTITLE = "Trascrizione audio locale"
+
+# Palette dark moderna
+BG = "#0f1419"          # sfondo principale
+SURFACE = "#161b22"     # card / pannelli
+SURFACE_2 = "#1f242e"   # input / hover
+BORDER = "#2a3142"
+TXT = "#e6e8eb"
+TXT_MUTED = "#7d8590"
+ACCENT = "#4a9eff"      # blu primario
+ACCENT_HOVER = "#5fb0ff"
+ACCENT_FG = "#0f1419"
+OK = "#3fb950"
+WARN = "#d29922"
+ERR = "#f85149"
+
+FONT = "Segoe UI"
 
 
 def get_base_path():
@@ -105,16 +95,8 @@ def get_models_dir():
     return d
 
 
-def model_exists(model_name):
-    info = MODEL_INFO[model_name]
-    if info["engine"] == "whisper":
-        return os.path.isfile(os.path.join(get_models_dir(), info["file"]))
-    elif info["engine"] == "voxtral":
-        # Per Voxtral controlliamo se la cartella HF cache contiene almeno il
-        # config.json — segno che il modello è stato scaricato.
-        folder = os.path.join(get_models_dir(), info["folder"])
-        return os.path.isfile(os.path.join(folder, "config.json"))
-    return False
+def model_exists():
+    return os.path.isfile(os.path.join(get_models_dir(), MODEL_FILE))
 
 
 def check_ffmpeg():
@@ -199,45 +181,14 @@ def get_device_info():
     return {"device": "cpu", "name": "CPU", "vram_gb": None}
 
 
-def download_model(model_name, progress_callback):
-    info = MODEL_INFO[model_name]
-    if info["engine"] == "voxtral":
-        return _download_voxtral(model_name, progress_callback)
-    return _download_whisper(model_name, progress_callback)
-
-
-def _download_voxtral(model_name, progress_callback):
-    """Scarica un modello Voxtral via huggingface_hub.snapshot_download."""
-    info = MODEL_INFO[model_name]
-    folder = os.path.join(get_models_dir(), info["folder"])
-    try:
-        progress_callback(f"Download Voxtral ({info['size_gb']:.1f} GB)...", -1)
-        from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id=info["hf_id"],
-            local_dir=folder,
-            local_dir_use_symlinks=False,
-        )
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def _download_whisper(model_name, progress_callback):
+def download_model(progress_callback):
     import urllib.request
 
-    urls = {
-        "medium": "https://openaipublic.azureedge.net/main/whisper/models/345ae4da62f9b3d59415adc60127b97c714f32e89e936602e85993674d08dcb1/medium.pt",
-        "large": "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb/large-v3.pt",
-    }
-
-    info = MODEL_INFO[model_name]
-    url = urls[model_name]
-    dest = os.path.join(get_models_dir(), info["file"])
+    dest = os.path.join(get_models_dir(), MODEL_FILE)
     dest_tmp = dest + ".downloading"
 
     try:
-        req = urllib.request.urlopen(url)
+        req = urllib.request.urlopen(MODEL_URL)
         total = int(req.headers.get("Content-Length", 0))
         downloaded = 0
         chunk_size = 1024 * 1024
@@ -355,121 +306,38 @@ def diarize(audio_path, num_speakers=None, on_status=None):
     return [(t.start, t.end, label) for t, _, label in ann.itertracks(yield_label=True)]
 
 
-def _transcribe_voxtral(audio_path, model_name, ui_callbacks):
-    """Trascrizione con Voxtral Mini 3B (mistralai/Voxtral-Mini-3B-2507).
-    Output: testo a flusso (no segmenti con timestamp puntuali).
-    Per ora niente diarization (Voxtral Mini open non la include — pyannote
-    da chiamare in step separato se serve)."""
-    on_status, on_progress, on_segment, on_done = ui_callbacks
-    import time
-    info = MODEL_INFO[model_name]
-    folder = os.path.join(get_models_dir(), info["folder"])
-
-    on_status("Caricamento Voxtral in memoria...")
-    on_progress("Caricamento modello...", -1)
-    try:
-        import torch
-        from transformers import VoxtralForConditionalGeneration, AutoProcessor
-        device = get_device()
-        dtype = torch.bfloat16 if device == "cuda" else torch.float32
-        processor = AutoProcessor.from_pretrained(folder)
-        model = VoxtralForConditionalGeneration.from_pretrained(
-            folder, torch_dtype=dtype, device_map=device,
-        )
-    except Exception as e:
-        on_done(False, f"Errore caricamento Voxtral:\n{e}\n\nIl modello potrebbe non essere stato scaricato — usa 'Scarica modello'.", None)
-        return
-
-    on_status("Sbobinatura con Voxtral...")
-    on_progress("Trascrizione...", 0)
-    t0 = time.time()
-    try:
-        # Carichiamo audio via whisper/ffmpeg (gestisce mp3/m4a/ogg/wav)
-        # e lo passiamo a Voxtral come numpy (soundfile non gestisce m4a).
-        audio_np = load_audio_array(audio_path)  # float32 mono @ 16 kHz
-        # Il processor vuole audio come lista + format come lista (anche per
-        # un solo file). Passare numpy singolo causa "len(None)" bug.
-        inputs = processor.apply_transcription_request(
-            audio=[audio_np],
-            model_id=info["hf_id"],
-            language=["it"],
-            sampling_rate=16000,
-            format=["wav"],
-        )
-        if hasattr(inputs, "to"):
-            inputs = inputs.to(device, dtype=dtype if dtype != torch.float32 else None)
-        else:
-            # dict di tensor
-            inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
-        outputs = model.generate(**inputs, max_new_tokens=8000, do_sample=False)
-        # Decode tutto, poi prendiamo il testo
-        input_len = inputs["input_ids"].shape[1] if isinstance(inputs, dict) else inputs.input_ids.shape[1]
-        new_tokens = outputs[:, input_len:]
-        text = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
-    except Exception as e:
-        import traceback
-        on_done(False, f"Errore Voxtral:\n{e}\n\n{traceback.format_exc()[:500]}", None)
-        return
-
-    elapsed = time.time() - t0
-    on_status("Salvataggio trascrizione...")
-    out_path = os.path.splitext(audio_path)[0] + ".txt"
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(text + "\n")
-        # mostriamo il testo nell'UI come una grande riga
-        for line in text.split("\n"):
-            if line.strip():
-                on_segment(line)
-    except Exception as e:
-        on_done(False, f"Errore salvataggio:\n{e}", None)
-        return
-
-    mins = int(elapsed // 60); secs = int(elapsed % 60)
-    on_progress("Completato!", 100)
-    on_done(True, out_path, f"Voxtral — tempo: {mins}m {secs}s")
-
-
-def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
+def transcribe(audio_path, ui_callbacks, resume_from=0.0,
                diarize_on=False, num_speakers=None,
-               normalize_on=False):
+               normalize_on=False, preloaded_model=None):
     on_status, on_progress, on_segment, on_done = ui_callbacks
 
-    # Normalizzazione volume opzionale (NON denoise — solo livello).
-    # I modelli ASR moderni (Whisper, Voxtral) sono stati addestrati su audio
-    # raw rumoroso: pre-processarli col denoise di solito PEGGIORA i risultati.
-    # La normalizzazione del volume invece è "safe" perché non altera lo spettro.
     if normalize_on:
         try:
             audio_path, _ = normalize_volume(audio_path, on_status=on_status)
         except Exception as e:
             on_status(f"Normalizzazione fallita ({e}); proseguo con l'originale.")
 
-    # Dispatch al backend appropriato in base al modello scelto
-    info = MODEL_INFO.get(model_name, {})
-    if info.get("engine") == "voxtral":
-        return _transcribe_voxtral(audio_path, model_name, ui_callbacks)
-
     if not check_ffmpeg():
-        on_done(False, "ffmpeg non trovato!\n\nMetti ffmpeg.exe nella stessa cartella di Sbobinator.", None)
+        on_done(False, "ffmpeg non trovato.\n\nMetti ffmpeg.exe nella stessa cartella dell'eseguibile.", None)
         return
 
-    if not model_exists(model_name):
-        on_status(f"Modello {model_name} non trovato. Download in corso...")
-        ok, err = download_model(model_name, lambda msg, pct: on_progress(msg, pct))
-        if not ok:
-            on_done(False, f"Errore download modello:\n{err}\n\nSe il PC non ha internet, scarica il modello su un altro PC e copialo nella cartella 'models/'.", None)
+    import whisper
+    if preloaded_model is not None:
+        model = preloaded_model
+    else:
+        if not model_exists():
+            on_status("Modello non trovato. Download in corso...")
+            ok, err = download_model(lambda msg, pct: on_progress(msg, pct))
+            if not ok:
+                on_done(False, f"Errore download modello:\n{err}\n\nSe il PC non ha internet, copia large-v3.pt in models/.", None)
+                return
+        on_status("Caricamento modello in memoria...")
+        on_progress("Caricamento modello...", -1)
+        try:
+            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(), device=get_device())
+        except Exception as e:
+            on_done(False, f"Errore caricamento modello:\n{e}\n\nIl file potrebbe essere corrotto. Cancella la cartella models/ e riscarica.", None)
             return
-
-    on_status("Caricamento modello in memoria...")
-    on_progress("Caricamento modello...", -1)
-
-    try:
-        import whisper
-        model = whisper.load_model(model_name, download_root=get_models_dir(), device=get_device())
-    except Exception as e:
-        on_done(False, f"Errore caricamento modello:\n{e}\n\nIl file potrebbe essere corrotto. Cancella la cartella 'models/' e riscarica.", None)
-        return
 
     on_status("Analisi audio...")
     duration = get_audio_duration(audio_path)
@@ -621,379 +489,671 @@ def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
     on_done(True, out_path, f"{detected} — tempo: {mins}m {secs}s")
 
 
+AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".ogg", ".flac", ".wma",
+              ".aac", ".mp4", ".webm", ".opus")
+
+
+def fmt_duration(seconds):
+    if seconds is None:
+        return "—"
+    s = int(round(seconds))
+    h, rem = divmod(s, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+class FlatButton(tk.Button):
+    """Button flat con hover, padding generoso. Primario/secondario via stile."""
+
+    def __init__(self, master, text, command, kind="primary", **kw):
+        if kind == "primary":
+            bg, fg, hover = ACCENT, ACCENT_FG, ACCENT_HOVER
+        elif kind == "danger":
+            bg, fg, hover = SURFACE_2, ERR, "#2a2027"
+        else:  # secondary
+            bg, fg, hover = SURFACE_2, TXT, BORDER
+        super().__init__(
+            master, text=text, command=command,
+            bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
+            font=(FONT, 10), relief="flat", borderwidth=0,
+            padx=18, pady=9, cursor="hand2", **kw,
+        )
+        self._bg, self._hover = bg, hover
+        self.bind("<Enter>", lambda _e: self.configure(bg=self._hover))
+        self.bind("<Leave>", lambda _e: self.configure(bg=self._bg))
+
+    def set_kind(self, kind):
+        if kind == "primary":
+            self._bg, self._hover = ACCENT, ACCENT_HOVER
+        elif kind == "danger":
+            self._bg, self._hover = SURFACE_2, "#2a2027"
+        else:
+            self._bg, self._hover = SURFACE_2, BORDER
+        self.configure(bg=self._bg)
+
+
+# Stati item della coda
+ST_PENDING = "pending"
+ST_RUNNING = "running"
+ST_DONE = "done"
+ST_SKIPPED = "skipped"
+ST_ERROR = "error"
+
+STATE_BADGE = {
+    ST_PENDING: ("In attesa", TXT_MUTED),
+    ST_RUNNING: ("In corso", ACCENT),
+    ST_DONE: ("Completato", OK),
+    ST_SKIPPED: ("Saltato", TXT_MUTED),
+    ST_ERROR: ("Errore", ERR),
+}
+
+
+class QueueItem:
+    __slots__ = ("path", "duration", "state", "resume_from", "error")
+
+    def __init__(self, path):
+        self.path = path
+        self.duration = get_audio_duration(path)
+        self.state = ST_PENDING
+        self.resume_from = 0.0
+        self.error = None
+
+
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Sbobinator — Comando Trascrizioni")
-        self.root.geometry("600x600")
-        self.root.resizable(False, False)
-        self.root.configure(bg=CARA_BLU)
+        self.root.title(APP_NAME)
+        self.root.geometry("820x780")
+        self.root.minsize(720, 640)
+        self.root.configure(bg=BG)
 
-        # Stile Carabinieri per i widget ttk (barra di avanzamento)
-        style = ttk.Style()
+        self.items = []                # lista QueueItem
+        self.row_to_index = {}         # treeview iid -> idx
+        self.current_idx = None        # indice item in elaborazione
+        self.queue_running = False
+        self.stop_requested = False
+        self.whisper_model = None      # caricato una volta sola, riusato per tutta la coda
+
+        self._init_ttk_style()
+        self._build_ui()
+        self._refresh_model_status()
+
+    # ---------- stile ttk ----------
+
+    def _init_ttk_style(self):
+        s = ttk.Style()
         try:
-            style.theme_use("default")
+            s.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Cara.Horizontal.TProgressbar",
-                        troughcolor=CARA_BLU_SCURO, background=CARA_ROSSO,
-                        bordercolor=CARA_ORO, lightcolor=CARA_ROSSO, darkcolor=CARA_ROSSO)
 
-        frame = tk.Frame(root, padx=20, pady=15, bg=CARA_BLU)
-        frame.pack(fill="both", expand=True)
+        s.configure("Verb.Horizontal.TProgressbar",
+                    troughcolor=SURFACE_2, background=ACCENT,
+                    bordercolor=SURFACE, lightcolor=ACCENT, darkcolor=ACCENT,
+                    thickness=8)
 
-        # Banda tricolore dei gradi (oro/rosso) in alto
-        banda = tk.Frame(frame, bg=CARA_BLU)
-        banda.pack(fill="x", pady=(0, 8))
-        tk.Frame(banda, bg=CARA_ROSSO, height=4).pack(fill="x")
+        s.configure("Verb.Treeview",
+                    background=SURFACE, fieldbackground=SURFACE,
+                    foreground=TXT, bordercolor=BORDER, borderwidth=0,
+                    rowheight=28, font=(FONT, 10))
+        s.configure("Verb.Treeview.Heading",
+                    background=SURFACE_2, foreground=TXT_MUTED,
+                    font=(FONT, 9, "bold"), relief="flat", borderwidth=0)
+        s.map("Verb.Treeview.Heading",
+              background=[("active", SURFACE_2)])
+        s.map("Verb.Treeview",
+              background=[("selected", "#2a3f5f")],
+              foreground=[("selected", TXT)])
 
-        tk.Label(frame, text="🔥  S B O B I N A T O R  🔥", font=("Arial", 18, "bold"),
-                 fg=CARA_ORO, bg=CARA_BLU).pack(pady=(0, 2))
-        tk.Label(frame, text="Trascrittore audio locale — per il Comando locale",
-                 font=("Arial", 9), fg=CARA_TXT, bg=CARA_BLU).pack(pady=(0, 1))
-        tk.Label(frame, text="⚜  Nei secoli fedele  ⚜", font=("Arial", 9, "italic"),
-                 fg=CARA_ROSSO, bg=CARA_BLU).pack(pady=(0, 6))
+        s.configure("Verb.TCombobox",
+                    fieldbackground=SURFACE_2, background=SURFACE_2,
+                    foreground=TXT, borderwidth=0, arrowcolor=TXT_MUTED)
+        s.map("Verb.TCombobox",
+              fieldbackground=[("readonly", SURFACE_2)],
+              foreground=[("readonly", TXT)])
 
+        s.configure("Verb.Vertical.TScrollbar",
+                    background=SURFACE_2, troughcolor=BG,
+                    bordercolor=BG, arrowcolor=TXT_MUTED, borderwidth=0)
+
+    # ---------- costruzione UI ----------
+
+    def _build_ui(self):
+        root_pad = tk.Frame(self.root, bg=BG, padx=24, pady=20)
+        root_pad.pack(fill="both", expand=True)
+
+        self._build_header(root_pad)
+        self._build_options(root_pad)
+        self._build_queue(root_pad)
+        self._build_action_bar(root_pad)
+        self._build_status(root_pad)
+        self._build_preview(root_pad)
+
+    def _build_header(self, parent):
+        head = tk.Frame(parent, bg=BG)
+        head.pack(fill="x", pady=(0, 18))
+
+        left = tk.Frame(head, bg=BG)
+        left.pack(side="left")
+        tk.Label(left, text=APP_NAME, font=(FONT, 22, "bold"),
+                 fg=TXT, bg=BG).pack(anchor="w")
+        tk.Label(left, text=APP_SUBTITLE, font=(FONT, 10),
+                 fg=TXT_MUTED, bg=BG).pack(anchor="w", pady=(2, 0))
+
+        right = tk.Frame(head, bg=BG)
+        right.pack(side="right")
         info = get_device_info()
         if info["device"] == "cuda":
-            vram = f" ({info['vram_gb']} GB)" if info["vram_gb"] else ""
-            device_text = f"⚡ GPU: {info['name']}{vram}"
-            device_color = CARA_ORO
+            vram = f"  ·  {info['vram_gb']} GB VRAM" if info["vram_gb"] else ""
+            dev_text = f"GPU  ·  {info['name']}{vram}"
+            dev_col = OK
         else:
-            device_text = "💻 CPU (nessuna GPU CUDA rilevata)"
-            device_color = COL_MUTED
-        tk.Label(frame, text=device_text, font=("Arial", 9),
-                 fg=device_color, bg=CARA_BLU).pack(pady=(0, 10))
+            dev_text = "CPU  ·  nessuna GPU CUDA"
+            dev_col = TXT_MUTED
+        self.device_lbl = tk.Label(right, text=dev_text, font=(FONT, 9),
+                                   fg=dev_col, bg=BG)
+        self.device_lbl.pack(anchor="e")
+        self.model_lbl = tk.Label(right, text="", font=(FONT, 9),
+                                  fg=TXT_MUTED, bg=BG)
+        self.model_lbl.pack(anchor="e", pady=(4, 0))
+        self.download_btn = FlatButton(right, "Scarica modello",
+                                       self.download_model_ui, kind="secondary")
+        # configure smaller padding for header context
+        self.download_btn.configure(padx=12, pady=6, font=(FONT, 9))
 
-        self.model_var = tk.StringVar(value="medium")
+    def _build_options(self, parent):
+        card = tk.Frame(parent, bg=SURFACE,
+                        highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="x", pady=(0, 14))
+        inner = tk.Frame(card, bg=SURFACE, padx=16, pady=12)
+        inner.pack(fill="x")
 
-        self.model_status = tk.Label(frame, text="", font=("Arial", 9), bg=CARA_BLU)
-        self.model_status.pack(pady=(0, 5))
-        self.check_models()
+        tk.Label(inner, text="OPZIONI", font=(FONT, 8, "bold"),
+                 fg=TXT_MUTED, bg=SURFACE).pack(anchor="w")
 
-        row = tk.Frame(frame, bg=CARA_BLU)
-        row.pack(fill="x", pady=(0, 10))
-        tk.Label(row, text="Modello:", font=("Arial", 10), fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
-        for name, info in MODEL_INFO.items():
-            tk.Radiobutton(row, text=info["label"], variable=self.model_var, value=name,
-                           font=("Arial", 9), command=self.check_models,
-                           bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
-                           activebackground=CARA_BLU, activeforeground=CARA_ORO,
-                           highlightthickness=0).pack(side="left", padx=(10, 0))
+        row = tk.Frame(inner, bg=SURFACE)
+        row.pack(fill="x", pady=(8, 0))
 
-        diar_row = tk.Frame(frame, bg=CARA_BLU)
-        diar_row.pack(fill="x", pady=(0, 10))
         self.diar_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(diar_row, text="Riconosci chi parla (più lento)",
-                       variable=self.diar_var, font=("Arial", 9),
-                       bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
-                       activebackground=CARA_BLU, activeforeground=CARA_ORO,
-                       highlightthickness=0).pack(side="left")
-        tk.Label(diar_row, text="Voci attese:", font=("Arial", 9),
-                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left", padx=(12, 4))
+        tk.Checkbutton(row, text="Riconosci i parlanti",
+                       variable=self.diar_var, font=(FONT, 10),
+                       bg=SURFACE, fg=TXT, selectcolor=SURFACE_2,
+                       activebackground=SURFACE, activeforeground=TXT,
+                       highlightthickness=0, borderwidth=0).pack(side="left")
+
+        tk.Label(row, text="Voci attese", font=(FONT, 9),
+                 fg=TXT_MUTED, bg=SURFACE).pack(side="left", padx=(18, 6))
         self.speakers_var = tk.StringVar(value="auto")
-        ttk.Combobox(diar_row, textvariable=self.speakers_var, width=5, state="readonly",
+        ttk.Combobox(row, textvariable=self.speakers_var, width=6,
+                     state="readonly", style="Verb.TCombobox",
                      values=["auto", "2", "3", "4", "5", "6"]).pack(side="left")
-        self.rename_btn = tk.Button(diar_row, text="Rinomina voci", command=self.rename_speakers,
-                                    font=("Arial", 9), bg=CARA_BLU_SCURO, fg=CARA_TXT,
-                                    activebackground=CARA_ORO, activeforeground=CARA_BLU,
-                                    relief="flat", state="disabled")
-        self.rename_btn.pack(side="right")
 
-        # --- Profilo qualità + opzioni avanzate pulizia audio ---
-        profile_row = tk.Frame(frame, bg=CARA_BLU)
-        profile_row.pack(fill="x", pady=(0, 4))
-        tk.Label(profile_row, text="Profilo:", font=("Arial", 10),
-                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
-        self.profile_var = tk.StringVar(value="standard")
-        for value, label in [("standard", "Standard"),
-                             ("intercettazione", "🚓 Intercettazione"),
-                             ("max", "🎯 Max qualità"),
-                             ("advanced", "⚙️ Avanzato")]:
-            tk.Radiobutton(profile_row, text=label, variable=self.profile_var,
-                           value=value, font=("Arial", 9), bg=CARA_BLU, fg=CARA_TXT,
-                           selectcolor=CARA_BLU_SCURO, activebackground=CARA_BLU,
-                           activeforeground=CARA_ORO, highlightthickness=0,
-                           command=self._on_profile_change).pack(side="left", padx=(6, 0))
-
-        adv_row = tk.Frame(frame, bg=CARA_BLU)
-        adv_row.pack(fill="x", pady=(0, 8))
         self.normalize_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(adv_row, text="Normalizza volume (opzionale, per audio con livelli variabili)",
-                       variable=self.normalize_var, font=("Arial", 9),
-                       bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
-                       activebackground=CARA_BLU, activeforeground=CARA_ORO,
-                       highlightthickness=0).pack(side="left")
+        tk.Checkbutton(row, text="Normalizza volume",
+                       variable=self.normalize_var, font=(FONT, 10),
+                       bg=SURFACE, fg=TXT, selectcolor=SURFACE_2,
+                       activebackground=SURFACE, activeforeground=TXT,
+                       highlightthickness=0, borderwidth=0).pack(side="left", padx=(28, 0))
 
-        btn_row = tk.Frame(frame, bg=CARA_BLU)
-        btn_row.pack(fill="x", pady=(0, 10))
+    def _build_queue(self, parent):
+        card = tk.Frame(parent, bg=SURFACE,
+                        highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="both", expand=False, pady=(0, 14))
+        inner = tk.Frame(card, bg=SURFACE, padx=16, pady=12)
+        inner.pack(fill="both", expand=True)
 
-        self.btn = tk.Button(btn_row, text="Seleziona file audio", command=self.pick_file,
-                             height=2, font=("Arial", 11, "bold"),
-                             bg=CARA_ROSSO, fg="white", activebackground=CARA_ORO,
-                             activeforeground=CARA_BLU, relief="flat", cursor="hand2")
-        self.btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        header_row = tk.Frame(inner, bg=SURFACE)
+        header_row.pack(fill="x")
+        tk.Label(header_row, text="CODA DI LAVORO", font=(FONT, 8, "bold"),
+                 fg=TXT_MUTED, bg=SURFACE).pack(side="left")
+        self.queue_count = tk.Label(header_row, text="0 file",
+                                    font=(FONT, 9), fg=TXT_MUTED, bg=SURFACE)
+        self.queue_count.pack(side="right")
 
-        self.dl_btn = tk.Button(btn_row, text="Scarica\nmodello", command=self.download_model_ui,
-                                height=2, font=("Arial", 9), width=10,
-                                bg=CARA_BLU_SCURO, fg=CARA_TXT, activebackground=CARA_ORO,
-                                activeforeground=CARA_BLU, relief="flat", cursor="hand2")
-        self.dl_btn.pack(side="right")
+        tree_wrap = tk.Frame(inner, bg=SURFACE_2,
+                             highlightthickness=1, highlightbackground=BORDER)
+        tree_wrap.pack(fill="both", expand=True, pady=(8, 10))
 
-        self.status = tk.Label(frame, text="Pronto", font=("Arial", 10), fg=COL_MUTED, bg=CARA_BLU)
-        self.status.pack(pady=(0, 5))
+        self.tree = ttk.Treeview(
+            tree_wrap, style="Verb.Treeview",
+            columns=("state", "file", "duration"),
+            show="headings", height=8, selectmode="extended",
+        )
+        self.tree.heading("state", text="Stato", anchor="w")
+        self.tree.heading("file", text="File", anchor="w")
+        self.tree.heading("duration", text="Durata", anchor="e")
+        self.tree.column("state", width=110, minwidth=90, anchor="w", stretch=False)
+        self.tree.column("file", width=480, minwidth=200, anchor="w")
+        self.tree.column("duration", width=80, minwidth=60, anchor="e", stretch=False)
 
-        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100,
-                                        style="Cara.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", pady=(0, 5))
+        self.tree.tag_configure(ST_PENDING, foreground=TXT)
+        self.tree.tag_configure(ST_RUNNING, foreground=ACCENT)
+        self.tree.tag_configure(ST_DONE, foreground=OK)
+        self.tree.tag_configure(ST_SKIPPED, foreground=TXT_MUTED)
+        self.tree.tag_configure(ST_ERROR, foreground=ERR)
 
-        self.pct_label = tk.Label(frame, text="", font=("Arial", 9), fg=COL_MUTED, bg=CARA_BLU)
-        self.pct_label.pack(pady=(0, 10))
+        vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
+                            command=self.tree.yview,
+                            style="Verb.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
 
-        tk.Label(frame, text="Trascrizione live:", font=("Arial", 9, "bold"), anchor="w",
-                 fg=CARA_TXT, bg=CARA_BLU).pack(fill="x")
-        text_frame = tk.Frame(frame, bg=CARA_BLU)
-        text_frame.pack(fill="both", expand=True, pady=(3, 0))
+        actions = tk.Frame(inner, bg=SURFACE)
+        actions.pack(fill="x")
+        FlatButton(actions, "Aggiungi file", self.add_files,
+                   kind="secondary").pack(side="left")
+        FlatButton(actions, "Rimuovi", self.remove_selected,
+                   kind="secondary").pack(side="left", padx=(8, 0))
+        FlatButton(actions, "Svuota coda", self.clear_queue,
+                   kind="secondary").pack(side="left", padx=(8, 0))
+        FlatButton(actions, "Apri cartella output", self.open_output_dir,
+                   kind="secondary").pack(side="right")
 
-        self.transcript = tk.Text(text_frame, height=10, font=("Consolas", 9), wrap="word",
-                                  state="disabled", bg=CARA_BLU_SCURO, fg=CARA_TXT,
-                                  insertbackground=CARA_TXT, relief="flat",
-                                  highlightthickness=1, highlightbackground=CARA_ORO)
-        scrollbar = ttk.Scrollbar(text_frame, command=self.transcript.yview)
-        self.transcript.config(yscrollcommand=scrollbar.set)
+    def _build_action_bar(self, parent):
+        bar = tk.Frame(parent, bg=BG)
+        bar.pack(fill="x", pady=(0, 16))
+        self.start_btn = FlatButton(bar, "Avvia coda", self.toggle_queue,
+                                    kind="primary")
+        self.start_btn.configure(font=(FONT, 11, "bold"), padx=24, pady=12)
+        self.start_btn.pack(fill="x")
+
+    def _build_status(self, parent):
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="x", pady=(0, 10))
+        self.status_lbl = tk.Label(wrap, text="Pronto",
+                                   font=(FONT, 10), fg=TXT, bg=BG, anchor="w")
+        self.status_lbl.pack(fill="x")
+        self.progress = ttk.Progressbar(
+            wrap, mode="determinate", maximum=100,
+            style="Verb.Horizontal.TProgressbar",
+        )
+        self.progress.pack(fill="x", pady=(8, 4))
+        self.pct_lbl = tk.Label(wrap, text="", font=(FONT, 9),
+                                fg=TXT_MUTED, bg=BG, anchor="w")
+        self.pct_lbl.pack(fill="x")
+
+    def _build_preview(self, parent):
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill="both", expand=True)
+        tk.Label(wrap, text="ANTEPRIMA TRASCRIZIONE",
+                 font=(FONT, 8, "bold"), fg=TXT_MUTED, bg=BG).pack(anchor="w")
+        text_frame = tk.Frame(wrap, bg=SURFACE,
+                              highlightthickness=1, highlightbackground=BORDER)
+        text_frame.pack(fill="both", expand=True, pady=(6, 0))
+        self.transcript = tk.Text(
+            text_frame, height=8, font=("Consolas", 10), wrap="word",
+            state="disabled", bg=SURFACE, fg=TXT,
+            insertbackground=TXT, relief="flat", borderwidth=0,
+            padx=12, pady=10,
+        )
+        vsb = ttk.Scrollbar(text_frame, command=self.transcript.yview,
+                            style="Verb.Vertical.TScrollbar")
+        self.transcript.config(yscrollcommand=vsb.set)
         self.transcript.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        vsb.pack(side="right", fill="y")
 
-    def check_models(self):
-        model = self.model_var.get()
-        if model_exists(model):
-            self.model_status.config(text=f"✓ Modello {model} trovato", fg=COL_OK)
+    # ---------- helpers UI ----------
+
+    def _set_status(self, text, color=TXT):
+        self.status_lbl.config(text=text, fg=color)
+
+    def _set_progress(self, msg, pct):
+        self.pct_lbl.config(text=msg)
+        if pct >= 0:
+            try:
+                self.progress.stop()
+            except Exception:
+                pass
+            self.progress["mode"] = "determinate"
+            self.progress["value"] = pct
         else:
-            self.model_status.config(
-                text=f"✗ Modello {model} non trovato — verrà scaricato al primo uso (serve internet)",
-                fg=COL_WARN)
+            self.progress["mode"] = "indeterminate"
+            try:
+                self.progress.start(10)
+            except Exception:
+                pass
+
+    def _set_transcript_lines(self, lines):
+        self.transcript.config(state="normal")
+        self.transcript.delete("1.0", "end")
+        self.transcript.insert("end", "".join(l + "\n" for l in lines))
+        self.transcript.see("end")
+        self.transcript.config(state="disabled")
+
+    def _append_transcript(self, line):
+        self.transcript.config(state="normal")
+        self.transcript.insert("end", line + "\n")
+        self.transcript.see("end")
+        self.transcript.config(state="disabled")
+
+    def _refresh_model_status(self):
+        if model_exists():
+            self.model_lbl.config(text="Modello Whisper Large-v3 pronto", fg=OK)
+            try:
+                self.download_btn.pack_forget()
+            except Exception:
+                pass
+        else:
+            self.model_lbl.config(
+                text=f"Modello assente — scaricalo (~{MODEL_SIZE_GB:.1f} GB)",
+                fg=WARN,
+            )
+            try:
+                self.download_btn.pack(anchor="e", pady=(6, 0))
+            except Exception:
+                pass
 
     def download_model_ui(self):
-        model_name = self.model_var.get()
-        if model_exists(model_name):
-            messagebox.showinfo("Sbobinator", f"Il modello {model_name} è già scaricato!")
+        if model_exists():
+            messagebox.showinfo(APP_NAME, "Modello già presente.")
+            self._refresh_model_status()
             return
+        self.download_btn.configure(state="disabled")
+        self.start_btn.configure(state="disabled")
 
-        self.btn.config(state="disabled")
-        self.dl_btn.config(state="disabled")
+        def progress(msg, pct):
+            self.root.after(0, self._set_progress, msg, pct)
 
-        def on_progress(msg, pct):
-            def update():
-                self.pct_label.config(text=msg)
-                if pct >= 0:
-                    self.progress["mode"] = "determinate"
-                    self.progress["value"] = pct
-                else:
-                    self.progress["mode"] = "indeterminate"
-                    self.progress.start(10)
-            self.root.after(0, update)
+        def worker():
+            self.root.after(0, self._set_status, "Download modello in corso...", ACCENT)
+            ok, err = download_model(progress)
 
-        def do_download():
-            self.root.after(0, lambda: self.status.config(text=f"Download modello {model_name}...", fg=COL_INFO))
-            ok, err = download_model(model_name, on_progress)
             def finish():
                 try:
                     self.progress.stop()
                 except Exception:
                     pass
                 self.progress["mode"] = "determinate"
-                self.btn.config(state="normal")
-                self.dl_btn.config(state="normal")
-                self.check_models()
+                self.download_btn.configure(state="normal")
+                self.start_btn.configure(state="normal")
+                self._refresh_model_status()
                 if ok:
                     self.progress["value"] = 100
-                    self.status.config(text=f"Modello {model_name} scaricato!", fg=COL_OK)
-                    messagebox.showinfo("Sbobinator", f"Modello {model_name} scaricato nella cartella models/.\n\nOra puoi copiare tutta la cartella su chiavetta per l'uso offline.")
+                    self._set_status("Modello scaricato", OK)
+                    messagebox.showinfo(
+                        APP_NAME,
+                        "Modello Whisper Large-v3 scaricato in models/.\n\n"
+                        "Per uso offline puoi copiare la cartella su chiavetta.")
                 else:
                     self.progress["value"] = 0
-                    self.status.config(text="Errore download", fg=COL_ERR)
-                    messagebox.showerror("Errore", f"Download fallito:\n{err}")
+                    self._set_status("Download fallito", ERR)
+                    messagebox.showerror(APP_NAME, f"Download fallito:\n{err}")
             self.root.after(0, finish)
 
-        t = threading.Thread(target=do_download, daemon=True)
-        t.start()
+        threading.Thread(target=worker, daemon=True).start()
 
-    def pick_file(self):
-        path = filedialog.askopenfilename(
-            title="Seleziona file audio",
+    def _refresh_queue_view(self):
+        self.tree.delete(*self.tree.get_children())
+        self.row_to_index.clear()
+        for idx, it in enumerate(self.items):
+            badge, _ = STATE_BADGE[it.state]
+            iid = self.tree.insert(
+                "", "end",
+                values=(badge, os.path.basename(it.path), fmt_duration(it.duration)),
+                tags=(it.state,),
+            )
+            self.row_to_index[iid] = idx
+        pending = sum(1 for i in self.items if i.state == ST_PENDING)
+        done = sum(1 for i in self.items if i.state == ST_DONE)
+        total = len(self.items)
+        self.queue_count.config(
+            text=f"{total} file  ·  {pending} in attesa  ·  {done} completati"
+        )
+
+    def _update_item_state(self, idx, state):
+        self.items[idx].state = state
+        for iid, i in self.row_to_index.items():
+            if i == idx:
+                badge, _ = STATE_BADGE[state]
+                self.tree.set(iid, "state", badge)
+                self.tree.item(iid, tags=(state,))
+                self.tree.see(iid)
+                break
+
+    # ---------- gestione coda ----------
+
+    def add_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Aggiungi file audio alla coda",
             filetypes=[
-                ("Audio", "*.mp3 *.wav *.m4a *.ogg *.flac *.wma *.aac *.mp4 *.webm *.opus"),
+                ("Audio", " ".join("*" + e for e in AUDIO_EXTS)),
                 ("Tutti i file", "*.*"),
             ],
         )
-        if not path:
+        if not paths:
+            return
+        existing = {it.path for it in self.items}
+        added = 0
+        for p in paths:
+            if p in existing:
+                continue
+            self.items.append(QueueItem(p))
+            added += 1
+        if added:
+            self._refresh_queue_view()
+            self._set_status(f"Aggiunti {added} file alla coda")
+
+    def remove_selected(self):
+        if self.queue_running:
+            return
+        sel = self.tree.selection()
+        if not sel:
+            return
+        indices = sorted({self.row_to_index[iid] for iid in sel}, reverse=True)
+        for i in indices:
+            del self.items[i]
+        self._refresh_queue_view()
+
+    def clear_queue(self):
+        if self.queue_running:
+            return
+        if not self.items:
+            return
+        if not messagebox.askyesno(APP_NAME, "Svuotare la coda?"):
+            return
+        self.items.clear()
+        self._refresh_queue_view()
+        self._set_status("Coda svuotata")
+
+    def open_output_dir(self):
+        # apre la cartella del primo file (o cwd)
+        if self.items:
+            d = os.path.dirname(self.items[0].path)
+        else:
+            d = get_base_path()
+        try:
+            os.startfile(d)
+        except Exception:
+            pass
+
+    # ---------- avvio coda ----------
+
+    def toggle_queue(self):
+        if self.queue_running:
+            # richiesta stop: termina dopo il file corrente
+            self.stop_requested = True
+            self.start_btn.configure(text="Arresto richiesto…", state="disabled")
+            self._set_status("Mi fermo dopo il file corrente", WARN)
+            return
+        self.start_queue()
+
+    def start_queue(self):
+        pending = [it for it in self.items if it.state == ST_PENDING]
+        if not pending:
+            messagebox.showinfo(APP_NAME, "Nessun file in attesa nella coda.")
             return
 
-        resume_from = 0.0
-        out_path = os.path.splitext(path)[0] + ".txt"
-        if os.path.isfile(out_path) and os.path.getsize(out_path) > 0:
-            last = last_transcribed_time(out_path)
-            if last > 0:
-                ans = messagebox.askyesnocancel(
-                    "Sbobinator",
-                    f"Esiste già una trascrizione per questo audio, arrivata a "
-                    f"{int(last // 60):02d}:{int(last % 60):02d}.\n\n"
-                    "Sì = riprendi da lì\n"
-                    "No = ricomincia da capo\n"
-                    "Annulla = lascia stare",
-                )
-                if ans is None:
-                    return
-                resume_from = last if ans else 0.0
+        # Policy globale per file con .txt esistente
+        with_existing = [it for it in pending
+                         if os.path.isfile(os.path.splitext(it.path)[0] + ".txt")
+                         and os.path.getsize(os.path.splitext(it.path)[0] + ".txt") > 0]
+        policy = "fresh"  # default
+        if with_existing:
+            n = len(with_existing)
+            ans = messagebox.askyesnocancel(
+                APP_NAME,
+                f"Per {n} file esiste già una trascrizione parziale.\n\n"
+                "Sì  =  riprendi da dove avevi lasciato\n"
+                "No  =  ricomincia da capo\n"
+                "Annulla  =  salta quei file",
+            )
+            if ans is None:
+                policy = "skip"
+            elif ans:
+                policy = "resume"
+            else:
+                policy = "fresh"
 
-        self.start_transcription(path, resume_from)
+        for it in pending:
+            txt = os.path.splitext(it.path)[0] + ".txt"
+            has_existing = os.path.isfile(txt) and os.path.getsize(txt) > 0
+            if has_existing and policy == "resume":
+                it.resume_from = last_transcribed_time(txt)
+            elif has_existing and policy == "skip":
+                it.state = ST_SKIPPED
+            else:
+                it.resume_from = 0.0
+        self._refresh_queue_view()
 
-    def add_segment(self, line):
-        def update():
-            if line == "__RELOAD__":
-                # ricarica il file (ora con le etichette dei parlanti)
-                self.transcript.config(state="normal")
-                self.transcript.delete("1.0", "end")
-                try:
-                    with open(self._current_out, "r", encoding="utf-8") as f:
-                        self.transcript.insert("end", f.read())
-                except Exception:
-                    pass
-                self.transcript.see("end")
-                self.transcript.config(state="disabled")
-                return
-            self.transcript.config(state="normal")
-            self.transcript.insert("end", line + "\n")
-            self.transcript.see("end")
-            self.transcript.config(state="disabled")
-        self.root.after(0, update)
+        self.queue_running = True
+        self.stop_requested = False
+        if hasattr(self, "_first_err_shown"):
+            del self._first_err_shown
+        self.start_btn.set_kind("danger")
+        self.start_btn.configure(text="Ferma coda")
 
-    def start_transcription(self, path, resume_from=0.0):
-        self.btn.config(state="disabled")
-        self.transcript.config(state="normal")
-        self.transcript.delete("1.0", "end")
-        if resume_from > 0:
-            # mostra ciò che era già stato trascritto, poi si accoda il resto
+        threading.Thread(target=self._run_queue, daemon=True).start()
+
+    def _run_queue(self):
+        pending = [(i, it) for i, it in enumerate(self.items) if it.state == ST_PENDING]
+        total = len(pending)
+
+        if self.whisper_model is None:
+            self.root.after(0, self._set_status, "Caricamento modello in memoria...", ACCENT)
+            self.root.after(0, self._set_progress, "Caricamento modello...", -1)
             try:
-                with open(os.path.splitext(path)[0] + ".txt", "r", encoding="utf-8") as f:
-                    self.transcript.insert("end", f.read())
-            except Exception:
-                pass
-            self.transcript.see("end")
-        self.transcript.config(state="disabled")
-        self.progress["value"] = 0
+                if not model_exists():
+                    self.root.after(0, self._set_status, "Download modello...", ACCENT)
+                    ok, err = download_model(
+                        lambda msg, pct: self.root.after(0, self._set_progress, msg, pct))
+                    if not ok:
+                        self.root.after(0, messagebox.showerror, APP_NAME,
+                                        f"Download modello fallito:\n{err}")
+                        self.root.after(0, self._finish_queue)
+                        return
+                import whisper
+                self.whisper_model = whisper.load_model(
+                    MODEL_NAME, download_root=get_models_dir(), device=get_device())
+            except Exception as e:
+                self.root.after(0, messagebox.showerror, APP_NAME,
+                                f"Errore caricamento modello:\n{e}")
+                self.root.after(0, self._finish_queue)
+                return
 
-        model_name = self.model_var.get()
-        self._current_out = os.path.splitext(path)[0] + ".txt"
-        diarize_on = self.diar_var.get()
-        sp = self.speakers_var.get()
-        num_speakers = None if sp == "auto" else int(sp)
-        self.rename_btn.config(state="disabled")
+        for n, (idx, it) in enumerate(pending, start=1):
+            if self.stop_requested:
+                break
+            self.current_idx = idx
+            self.root.after(0, self._update_item_state, idx, ST_RUNNING)
+            self.root.after(0, self._set_status,
+                            f"Elaborazione {n} di {total}  ·  {os.path.basename(it.path)}",
+                            ACCENT)
+            self.root.after(0, self._set_transcript_lines, [])
 
-        def on_status(msg):
-            self.root.after(0, lambda: self.status.config(text=msg, fg=COL_INFO))
+            done_event = threading.Event()
+            result_holder = {"ok": False, "out": None, "info": None}
 
-        def on_progress(msg, pct):
-            def update():
-                self.pct_label.config(text=msg)
-                if pct >= 0:
-                    self.progress["mode"] = "determinate"
-                    self.progress["value"] = pct
-                else:
-                    self.progress["mode"] = "indeterminate"
-                    self.progress.start(10)
-            self.root.after(0, update)
+            def on_status(msg):
+                self.root.after(0, self._set_status, msg, ACCENT)
 
-        def on_segment(line):
-            self.add_segment(line)
+            def on_progress(msg, pct):
+                self.root.after(0, self._set_progress, msg, pct)
 
-        def on_done(success, result, info):
-            def update():
+            def on_segment(line):
+                if line == "__RELOAD__":
+                    out = os.path.splitext(it.path)[0] + ".txt"
+                    try:
+                        with open(out, "r", encoding="utf-8") as f:
+                            content = f.read().splitlines()
+                        self.root.after(0, self._set_transcript_lines, content)
+                    except Exception:
+                        pass
+                    return
+                self.root.after(0, self._append_transcript, line)
+
+            def on_done(ok, result, info):
+                result_holder["ok"] = ok
+                result_holder["out"] = result
+                result_holder["info"] = info
+                done_event.set()
+
+            try:
+                transcribe(
+                    it.path,
+                    (on_status, on_progress, on_segment, on_done),
+                    resume_from=it.resume_from,
+                    diarize_on=self.diar_var.get(),
+                    num_speakers=(None if self.speakers_var.get() == "auto"
+                                  else int(self.speakers_var.get())),
+                    normalize_on=self.normalize_var.get(),
+                    preloaded_model=self.whisper_model,
+                )
+                # transcribe ora è bloccante e chiama on_done internamente
+                done_event.wait(timeout=1)
+            except Exception as e:
+                result_holder["ok"] = False
+                result_holder["info"] = str(e)
+
+            if result_holder["ok"]:
+                self.root.after(0, self._update_item_state, idx, ST_DONE)
+            else:
+                err_msg = result_holder.get("out") or result_holder.get("info") or "errore sconosciuto"
+                it.error = str(err_msg)
                 try:
-                    self.progress.stop()
+                    with open(os.path.join(get_base_path(), "verbalia_debug.log"),
+                              "a", encoding="utf-8") as logf:
+                        logf.write(f"\n--- {time.strftime('%H:%M:%S')} ---\n"
+                                   f"file: {it.path}\nerrore:\n{err_msg}\n")
                 except Exception:
                     pass
-                self.progress["mode"] = "determinate"
-                self.btn.config(state="normal")
-                if success:
-                    self.progress["value"] = 100
-                    self.status.config(text=f"Fatto! {info}", fg=COL_OK)
-                    self.pct_label.config(text="100%")
-                    if "Interlocutore" in self.transcript.get("1.0", "end"):
-                        self.rename_btn.config(state="normal")
-                    messagebox.showinfo("Sbobinator", f"Trascrizione salvata in:\n{result}")
-                else:
-                    self.progress["value"] = 0
-                    self.status.config(text="Errore", fg=COL_ERR)
-                    self.pct_label.config(text="")
-                    messagebox.showerror("Errore", result)
-            self.root.after(0, update)
+                self.root.after(0, self._update_item_state, idx, ST_ERROR)
+                # mostra il primo errore SUBITO per capire cosa è successo
+                if not hasattr(self, "_first_err_shown"):
+                    self._first_err_shown = True
+                    self.root.after(0, messagebox.showerror, APP_NAME,
+                                    f"Errore su {os.path.basename(it.path)}:\n\n{err_msg}")
 
-        callbacks = (on_status, on_progress, on_segment, on_done)
-        normalize_on = self.normalize_var.get()
-        t = threading.Thread(
-            target=transcribe,
-            args=(path, model_name, callbacks, resume_from,
-                  diarize_on, num_speakers, normalize_on),
-            daemon=True,
-        )
-        t.start()
+        self.root.after(0, self._finish_queue)
 
-    def _on_profile_change(self):
-        # Con l'app snellita (solo ASR raw + opzionale normalizzazione)
-        # i profili si limitano a impostare normalize on/off.
-        # Whisper/Voxtral sono stati addestrati su audio raw — non serve
-        # ripulire ulteriormente, peggiorerebbe i risultati.
-        p = self.profile_var.get()
-        if p == "standard":
-            self.normalize_var.set(False)
-        elif p == "intercettazione":
-            self.normalize_var.set(True)  # tipico forense: livelli variabili
-        elif p == "max":
-            self.normalize_var.set(True)
-        # advanced: lascia la scelta com'è
+    def _finish_queue(self):
+        self.queue_running = False
+        self.current_idx = None
+        try:
+            self.progress.stop()
+        except Exception:
+            pass
+        self.progress["mode"] = "determinate"
 
-    def rename_speakers(self):
-        import re
-        text = self.transcript.get("1.0", "end")
-        found = sorted(set(re.findall(r"Interlocutore \d+", text)),
-                       key=lambda s: int(s.split()[1]))
-        if not found:
-            return
-        win = tk.Toplevel(self.root)
-        win.title("Rinomina voci")
-        win.configure(bg=CARA_BLU)
-        entries = {}
-        for i, name in enumerate(found):
-            tk.Label(win, text=name + "  →", bg=CARA_BLU, fg=CARA_TXT,
-                     font=("Arial", 10)).grid(row=i, column=0, padx=8, pady=4, sticky="e")
-            entry = tk.Entry(win, width=24)
-            entry.grid(row=i, column=1, padx=8, pady=4)
-            entries[name] = entry
+        done = sum(1 for i in self.items if i.state == ST_DONE)
+        errors = sum(1 for i in self.items if i.state == ST_ERROR)
+        skipped = sum(1 for i in self.items if i.state == ST_SKIPPED)
 
-        def apply():
-            mapping = {old: e.get().strip() for old, e in entries.items() if e.get().strip()}
-            if mapping:
-                try:
-                    with open(self._current_out, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    for old, new in mapping.items():
-                        content = content.replace(old + ":", new + ":")
-                    with open(self._current_out, "w", encoding="utf-8") as f:
-                        f.write(content)
-                except Exception:
-                    pass
-                self.transcript.config(state="normal")
-                box = self.transcript.get("1.0", "end")
-                for old, new in mapping.items():
-                    box = box.replace(old + ":", new + ":")
-                self.transcript.delete("1.0", "end")
-                self.transcript.insert("end", box.rstrip("\n") + "\n")
-                self.transcript.config(state="disabled")
-            win.destroy()
-
-        tk.Button(win, text="Applica", command=apply, bg=CARA_ROSSO, fg="white",
-                  relief="flat").grid(row=len(found), column=0, columnspan=2, pady=10)
+        if self.stop_requested:
+            self._set_status(f"Coda fermata  ·  {done} completati, {errors} errori",
+                             WARN)
+        elif errors == 0:
+            self._set_status(f"Tutto completato  ·  {done} file trascritti",
+                             OK)
+        else:
+            self._set_status(f"Completato con errori  ·  {done} ok, {errors} ko",
+                             WARN)
+        self.pct_lbl.config(text="")
+        self.start_btn.set_kind("primary")
+        self.start_btn.configure(text="Avvia coda", state="normal")
+        self._refresh_queue_view()
 
 
 def main():
@@ -1036,19 +1196,18 @@ def main():
             if not check_ffmpeg():
                 print("ERRORE: ffmpeg non trovato. Mettilo nella stessa cartella.")
                 sys.exit(1)
-            print(f"Sbobinatura: {audio_path}")
-            model_name = "medium"
-            if not model_exists(model_name):
+            print(f"Trascrizione: {audio_path}")
+            if not model_exists():
                 print("Modello non trovato, download...")
-                ok, err = download_model(model_name, lambda msg, _pct: print(f"\r{msg}", end="", flush=True))
+                ok, err = download_model(lambda msg, _pct: print(f"\r{msg}", end="", flush=True))
                 print()
                 if not ok:
                     print(f"Errore download: {err}")
                     sys.exit(1)
             print("Caricamento modello...")
             import whisper
-            model = whisper.load_model(model_name, download_root=get_models_dir(), device=get_device())
-            print("Sbobinatura in corso...")
+            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(), device=get_device())
+            print("Trascrizione in corso...")
             result = model.transcribe(audio_path, language=None, fp16=False)
             out_path = os.path.splitext(audio_path)[0] + ".txt"
             with open(out_path, "w", encoding="utf-8") as f:
