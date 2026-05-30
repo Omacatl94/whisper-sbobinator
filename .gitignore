@@ -5,3 +5,11 @@ build/
 *.egg-info/
 models/
 .venv/
+checkpoints/
+dist_diar/
+dist_v3/
+build_diar/
+build_v3/
+archive_v3.txt
+*.selftest.log
+*.cleaned.wav

@@ -40,6 +40,12 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
+# Frozen: chdir a _MEIPASS così ClearVoice trova checkpoints/ relativi
+if getattr(sys, "frozen", False):
+    _mei = getattr(sys, "_MEIPASS", None)
+    if _mei and os.path.isdir(os.path.join(_mei, "checkpoints")):
+        os.chdir(_mei)
+
 MODEL_INFO = {
     "medium": {"label": "Medium (~1.5GB, più veloce)", "file": "medium.pt", "size_gb": 1.5},
     "large": {"label": "Large (~3GB, più preciso, dialetti)", "file": "large-v3.pt", "size_gb": 2.9},
