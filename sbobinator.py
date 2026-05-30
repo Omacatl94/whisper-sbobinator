@@ -220,7 +220,7 @@ def diarize(audio_path, num_speakers=None, on_status=None):
     from pyannote.audio import Pipeline
 
     pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
-    pipe.to(torch.device("cpu"))
+    pipe.to(torch.device(get_device()))
 
     audio = whisper.audio.load_audio(audio_path)  # float32 mono @ 16 kHz
     waveform = torch.from_numpy(audio).unsqueeze(0)
@@ -252,7 +252,7 @@ def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
 
     try:
         import whisper
-        model = whisper.load_model(model_name, download_root=get_models_dir())
+        model = whisper.load_model(model_name, download_root=get_models_dir(), device=get_device())
     except Exception as e:
         on_done(False, f"Errore caricamento modello:\n{e}\n\nIl file potrebbe essere corrotto. Cancella la cartella 'models/' e riscarica.", None)
         return
@@ -438,7 +438,18 @@ class App:
         tk.Label(frame, text="Trascrittore audio locale — per il Comando locale",
                  font=("Arial", 9), fg=CARA_TXT, bg=CARA_BLU).pack(pady=(0, 1))
         tk.Label(frame, text="⚜  Nei secoli fedele  ⚜", font=("Arial", 9, "italic"),
-                 fg=CARA_ROSSO, bg=CARA_BLU).pack(pady=(0, 12))
+                 fg=CARA_ROSSO, bg=CARA_BLU).pack(pady=(0, 6))
+
+        info = get_device_info()
+        if info["device"] == "cuda":
+            vram = f" ({info['vram_gb']} GB)" if info["vram_gb"] else ""
+            device_text = f"⚡ GPU: {info['name']}{vram}"
+            device_color = CARA_ORO
+        else:
+            device_text = "💻 CPU (nessuna GPU CUDA rilevata)"
+            device_color = COL_MUTED
+        tk.Label(frame, text=device_text, font=("Arial", 9),
+                 fg=device_color, bg=CARA_BLU).pack(pady=(0, 10))
 
         self.model_var = tk.StringVar(value="medium")
 
@@ -746,7 +757,7 @@ def main():
                     sys.exit(1)
             print("Caricamento modello...")
             import whisper
-            model = whisper.load_model(model_name, download_root=get_models_dir())
+            model = whisper.load_model(model_name, download_root=get_models_dir(), device=get_device())
             print("Sbobinatura in corso...")
             result = model.transcribe(audio_path, language=None, fp16=False)
             out_path = os.path.splitext(audio_path)[0] + ".txt"
