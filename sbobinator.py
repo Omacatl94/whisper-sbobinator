@@ -81,6 +81,130 @@ def load_audio_array(audio_path):
     return whisper.audio.load_audio(audio_path)
 
 
+# Cache dei modelli ClearVoice per evitare reload ad ogni chiamata
+_cv_se = None
+_cv_ss = None
+_cv_sr = None
+
+
+def _save_temp_wav(audio, sr, td, name="in.wav"):
+    """Salva un array numpy come WAV temporaneo. Ritorna il path."""
+    import os
+    import soundfile as sf
+    path = os.path.join(td, name)
+    sf.write(path, audio, sr)
+    return path
+
+
+def _cv_result_to_array(result):
+    """Converte il risultato di ClearVoice in numpy float32 mono."""
+    import numpy as np
+    if isinstance(result, dict):
+        # Prendiamo il primo valore (single-model case)
+        result = list(result.values())[0]
+    if hasattr(result, "numpy"):
+        result = result.numpy()
+    arr = np.asarray(result, dtype="float32").squeeze()
+    return arr
+
+
+def enhance_clearvoice(audio, sr=16000):
+    """Speech enhancement (denoising) con ClearVoice MossFormer2 SE 48K.
+    audio: numpy float32 mono. Ritorna numpy float32 mono @ sr."""
+    global _cv_se
+    import tempfile
+    from clearvoice import ClearVoice
+    if _cv_se is None:
+        _cv_se = ClearVoice(task="speech_enhancement",
+                            model_names=["MossFormer2_SE_48K"])
+    with tempfile.TemporaryDirectory() as td:
+        in_path = _save_temp_wav(audio, sr, td)
+        result = _cv_se(input_path=in_path, online_write=False)
+        return _cv_result_to_array(result)
+
+
+def separate_clearvoice(audio, sr=16000):
+    """Separazione di voci sovrapposte con MossFormer2 SS 16K.
+    Ritorna lista di numpy float32 (uno per voce)."""
+    global _cv_ss
+    import tempfile
+    import numpy as np
+    from clearvoice import ClearVoice
+    if _cv_ss is None:
+        _cv_ss = ClearVoice(task="speech_separation",
+                            model_names=["MossFormer2_SS_16K"])
+    with tempfile.TemporaryDirectory() as td:
+        in_path = _save_temp_wav(audio, sr, td)
+        result = _cv_ss(input_path=in_path, online_write=False)
+        # speech_separation ritorna dict di N stream (uno per voce) o lista
+        if isinstance(result, dict):
+            streams = list(result.values())
+        elif isinstance(result, (list, tuple)):
+            streams = list(result)
+        else:
+            streams = [result]
+        out = []
+        for s in streams:
+            if hasattr(s, "numpy"):
+                s = s.numpy()
+            out.append(np.asarray(s, dtype="float32").squeeze())
+        return out
+
+
+def super_resolve(audio, sr=16000):
+    """Super-risoluzione: porta audio a 48 kHz con MossFormer2 SR.
+    Ritorna (audio_48k, 48000)."""
+    global _cv_sr
+    import tempfile
+    from clearvoice import ClearVoice
+    if _cv_sr is None:
+        _cv_sr = ClearVoice(task="speech_super_resolution",
+                            model_names=["MossFormer2_SR_48K"])
+    with tempfile.TemporaryDirectory() as td:
+        in_path = _save_temp_wav(audio, sr, td)
+        result = _cv_sr(input_path=in_path, online_write=False)
+        return _cv_result_to_array(result), 48000
+
+
+def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
+                     on_status=None):
+    """Pipeline di pulizia audio. Ritorna (path_processato, sample_rate).
+    Se nessun flag attivo, ritorna (audio_path, 16000) senza toccare il file.
+    Altrimenti scrive un .cleaned.wav accanto all'audio originale.
+    """
+    if not (denoise or separate or superres):
+        return audio_path, 16000
+
+    import os
+    import soundfile as sf
+    import numpy as np
+
+    base, _ = os.path.splitext(audio_path)
+    audio = load_audio_array(audio_path)
+    sr = 16000
+
+    if denoise:
+        if on_status:
+            on_status("Pulizia rumore (MossFormer2 SE)...")
+        audio = enhance_clearvoice(audio, sr=sr)
+
+    if separate:
+        if on_status:
+            on_status("Separazione voci sovrapposte...")
+        streams = separate_clearvoice(audio, sr=sr)
+        # Prendiamo lo stream con RMS più alto (voce principale)
+        audio = max(streams, key=lambda s: float(np.sqrt(np.mean(s ** 2))))
+
+    if superres:
+        if on_status:
+            on_status("Super-risoluzione audio...")
+        audio, sr = super_resolve(audio, sr=sr)
+
+    out_path = base + ".cleaned.wav"
+    sf.write(out_path, audio, sr)
+    return out_path, sr
+
+
 def get_device():
     """Ritorna 'cuda' se disponibile e funzionante, altrimenti 'cpu'."""
     try:
@@ -240,8 +364,22 @@ def diarize(audio_path, num_speakers=None, on_status=None):
 
 
 def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
-               diarize_on=False, num_speakers=None):
+               diarize_on=False, num_speakers=None,
+               denoise_on=False, separate_on=False, superres_on=False):
     on_status, on_progress, on_segment, on_done = ui_callbacks
+
+    # Pipeline di pulizia audio opzionale (eseguita PRIMA della trascrizione)
+    if denoise_on or separate_on or superres_on:
+        try:
+            audio_path, _sr = preprocess_audio(
+                audio_path,
+                denoise=denoise_on,
+                separate=separate_on,
+                superres=superres_on,
+                on_status=on_status,
+            )
+        except Exception as e:
+            on_status(f"Pulizia audio fallita ({e}); proseguo con l'audio originale.")
 
     if not check_ffmpeg():
         on_done(False, "ffmpeg non trovato!\n\nMetti ffmpeg.exe nella stessa cartella di Sbobinator.", None)
@@ -493,6 +631,35 @@ class App:
                                     relief="flat", state="disabled")
         self.rename_btn.pack(side="right")
 
+        # --- Profilo qualità + opzioni avanzate pulizia audio ---
+        profile_row = tk.Frame(frame, bg=CARA_BLU)
+        profile_row.pack(fill="x", pady=(0, 4))
+        tk.Label(profile_row, text="Profilo:", font=("Arial", 10),
+                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
+        self.profile_var = tk.StringVar(value="standard")
+        for value, label in [("standard", "Standard"),
+                             ("intercettazione", "🚓 Intercettazione"),
+                             ("max", "🎯 Max qualità"),
+                             ("advanced", "⚙️ Avanzato")]:
+            tk.Radiobutton(profile_row, text=label, variable=self.profile_var,
+                           value=value, font=("Arial", 9), bg=CARA_BLU, fg=CARA_TXT,
+                           selectcolor=CARA_BLU_SCURO, activebackground=CARA_BLU,
+                           activeforeground=CARA_ORO, highlightthickness=0,
+                           command=self._on_profile_change).pack(side="left", padx=(6, 0))
+
+        adv_row = tk.Frame(frame, bg=CARA_BLU)
+        adv_row.pack(fill="x", pady=(0, 8))
+        self.denoise_var = tk.BooleanVar(value=False)
+        self.separate_var = tk.BooleanVar(value=False)
+        self.superres_var = tk.BooleanVar(value=False)
+        for var, text in [(self.denoise_var, "Denoise"),
+                          (self.separate_var, "Separa voci"),
+                          (self.superres_var, "Super-res")]:
+            tk.Checkbutton(adv_row, text=text, variable=var, font=("Arial", 9),
+                           bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
+                           activebackground=CARA_BLU, activeforeground=CARA_ORO,
+                           highlightthickness=0).pack(side="left", padx=(8, 0))
+
         btn_row = tk.Frame(frame, bg=CARA_BLU)
         btn_row.pack(fill="x", pady=(0, 10))
 
@@ -698,10 +865,33 @@ class App:
             self.root.after(0, update)
 
         callbacks = (on_status, on_progress, on_segment, on_done)
-        t = threading.Thread(target=transcribe,
-                             args=(path, model_name, callbacks, resume_from, diarize_on, num_speakers),
-                             daemon=True)
+        denoise_on = self.denoise_var.get()
+        separate_on = self.separate_var.get()
+        superres_on = self.superres_var.get()
+        t = threading.Thread(
+            target=transcribe,
+            args=(path, model_name, callbacks, resume_from,
+                  diarize_on, num_speakers,
+                  denoise_on, separate_on, superres_on),
+            daemon=True,
+        )
         t.start()
+
+    def _on_profile_change(self):
+        p = self.profile_var.get()
+        if p == "standard":
+            self.denoise_var.set(False)
+            self.separate_var.set(False)
+            self.superres_var.set(False)
+        elif p == "intercettazione":
+            self.denoise_var.set(True)
+            self.separate_var.set(True)
+            self.superres_var.set(False)
+        elif p == "max":
+            self.denoise_var.set(True)
+            self.separate_var.set(True)
+            self.superres_var.set(True)
+        # advanced: lascia le spunte come sono
 
     def rename_speakers(self):
         import re
