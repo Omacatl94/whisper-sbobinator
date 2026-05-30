@@ -74,6 +74,32 @@ def get_audio_duration(audio_path):
         return None
 
 
+def get_device():
+    """Ritorna 'cuda' se disponibile e funzionante, altrimenti 'cpu'."""
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            return "cuda"
+    except Exception:
+        pass
+    return "cpu"
+
+
+def get_device_info():
+    """Info per UI: device + nome + VRAM disponibile (GB)."""
+    import torch
+    device = get_device()
+    if device == "cuda":
+        name = torch.cuda.get_device_name(0)
+        try:
+            vram_bytes = torch.cuda.get_device_properties(0).total_memory
+            vram_gb = round(vram_bytes / (1024 ** 3), 1)
+        except Exception:
+            vram_gb = None
+        return {"device": "cuda", "name": name, "vram_gb": vram_gb}
+    return {"device": "cpu", "name": "CPU", "vram_gb": None}
+
+
 def download_model(model_name, progress_callback):
     import urllib.request
 
