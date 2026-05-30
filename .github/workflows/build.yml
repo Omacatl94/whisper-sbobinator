@@ -22,9 +22,11 @@ jobs:
           pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio torchvision
           pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" clearvoice sounddevice soundfile
 
-      - name: Pre-download ClearerVoice models
+      - name: Pre-download ClearerVoice models (SE + SS + SR per offline)
         run: |
           python -c "from clearvoice import ClearVoice; ClearVoice(task='speech_enhancement', model_names=['MossFormer2_SE_48K'])"
+          python -c "from clearvoice import ClearVoice; ClearVoice(task='speech_separation', model_names=['MossFormer2_SS_16K'])"
+          python -c "from clearvoice import ClearVoice; ClearVoice(task='speech_super_resolution', model_names=['MossFormer2_SR_48K'])"
         shell: pwsh
 
       - name: Build EXE
