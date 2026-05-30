@@ -3,7 +3,6 @@ tkinter-dnd2
 pyannote.audio==4.0.4
 torch
 torchaudio
-deepfilternet
 clearvoice
 sounddevice
 soundfile

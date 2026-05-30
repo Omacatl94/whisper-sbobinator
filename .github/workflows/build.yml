@@ -19,8 +19,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --extra-index-url https://download.pytorch.org/whl/cu121 torch torchaudio
-          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" deepfilternet clearvoice sounddevice soundfile
+          pip install --index-url https://download.pytorch.org/whl/cu121 torch torchaudio
+          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" clearvoice sounddevice soundfile
 
       - name: Build EXE
         run: pyinstaller sbobinator.spec
