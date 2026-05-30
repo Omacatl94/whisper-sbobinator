@@ -6,6 +6,7 @@ torchaudio
 torchvision
 transformers>=4.54
 accelerate
+mistral_common[audio]
 sounddevice
 soundfile
 --extra-index-url https://download.pytorch.org/whl/cu128
