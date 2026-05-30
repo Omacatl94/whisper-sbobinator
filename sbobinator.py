@@ -9,6 +9,22 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# Massimizza l'uso della CPU: usa tutti i core disponibili per torch e BLAS.
+# Vale per i pezzi della pipeline che girano su CPU anche quando c'e' la GPU
+# (es. clustering di pyannote, alcuni step di ClearerVoice).
+import os as _os
+_n = _os.cpu_count() or 4
+_os.environ.setdefault("OMP_NUM_THREADS", str(_n))
+_os.environ.setdefault("MKL_NUM_THREADS", str(_n))
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", str(_n))
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", str(_n))
+try:
+    import torch as _torch
+    _torch.set_num_threads(_n)
+    _torch.set_num_interop_threads(max(2, _n // 4))
+except Exception:
+    pass
+
 # Workaround: clearvoice tira dentro speechbrain, che ha un LazyModule per
 # k2_fsa. inspect.stack() (chiamato da pyannote/lightning) ne triggera l'import
 # che fallisce perché k2 non è installato. Rendiamo il fallimento "silente"
