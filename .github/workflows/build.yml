@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio torchvision
-          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" sounddevice soundfile
+          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" sounddevice soundfile "transformers>=4.54" accelerate
 
       - name: Build EXE
         run: pyinstaller sbobinator.spec

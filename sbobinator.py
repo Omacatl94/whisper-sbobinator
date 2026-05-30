@@ -59,8 +59,25 @@ if sys.stderr is None:
 # Frozen: niente più chdir/TORCH_HOME (era per ClearVoice/DNS64, droppati)
 
 MODEL_INFO = {
-    "medium": {"label": "Medium (~1.5GB, più veloce)", "file": "medium.pt", "size_gb": 1.5},
-    "large": {"label": "Large (~3GB, più preciso, dialetti)", "file": "large-v3.pt", "size_gb": 2.9},
+    "medium": {
+        "engine": "whisper",
+        "label": "Whisper Medium (~1.5GB, veloce)",
+        "file": "medium.pt",
+        "size_gb": 1.5,
+    },
+    "large": {
+        "engine": "whisper",
+        "label": "Whisper Large-v3 (~3GB, dialetti)",
+        "file": "large-v3.pt",
+        "size_gb": 2.9,
+    },
+    "voxtral-mini": {
+        "engine": "voxtral",
+        "label": "Voxtral Mini 3B (~6GB, top forense)",
+        "hf_id": "mistralai/Voxtral-Mini-3B-2507",
+        "folder": "voxtral-mini-3b",
+        "size_gb": 6.0,
+    },
 }
 
 # --- Tema "Carabinieri" ---
@@ -90,7 +107,14 @@ def get_models_dir():
 
 def model_exists(model_name):
     info = MODEL_INFO[model_name]
-    return os.path.isfile(os.path.join(get_models_dir(), info["file"]))
+    if info["engine"] == "whisper":
+        return os.path.isfile(os.path.join(get_models_dir(), info["file"]))
+    elif info["engine"] == "voxtral":
+        # Per Voxtral controlliamo se la cartella HF cache contiene almeno il
+        # config.json — segno che il modello è stato scaricato.
+        folder = os.path.join(get_models_dir(), info["folder"])
+        return os.path.isfile(os.path.join(folder, "config.json"))
+    return False
 
 
 def check_ffmpeg():
@@ -176,6 +200,30 @@ def get_device_info():
 
 
 def download_model(model_name, progress_callback):
+    info = MODEL_INFO[model_name]
+    if info["engine"] == "voxtral":
+        return _download_voxtral(model_name, progress_callback)
+    return _download_whisper(model_name, progress_callback)
+
+
+def _download_voxtral(model_name, progress_callback):
+    """Scarica un modello Voxtral via huggingface_hub.snapshot_download."""
+    info = MODEL_INFO[model_name]
+    folder = os.path.join(get_models_dir(), info["folder"])
+    try:
+        progress_callback(f"Download Voxtral ({info['size_gb']:.1f} GB)...", -1)
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=info["hf_id"],
+            local_dir=folder,
+            local_dir_use_symlinks=False,
+        )
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _download_whisper(model_name, progress_callback):
     import urllib.request
 
     urls = {
@@ -307,6 +355,74 @@ def diarize(audio_path, num_speakers=None, on_status=None):
     return [(t.start, t.end, label) for t, _, label in ann.itertracks(yield_label=True)]
 
 
+def _transcribe_voxtral(audio_path, model_name, ui_callbacks):
+    """Trascrizione con Voxtral Mini 3B (mistralai/Voxtral-Mini-3B-2507).
+    Output: testo a flusso (no segmenti con timestamp puntuali).
+    Per ora niente diarization (Voxtral Mini open non la include — pyannote
+    da chiamare in step separato se serve)."""
+    on_status, on_progress, on_segment, on_done = ui_callbacks
+    import time
+    info = MODEL_INFO[model_name]
+    folder = os.path.join(get_models_dir(), info["folder"])
+
+    on_status("Caricamento Voxtral in memoria...")
+    on_progress("Caricamento modello...", -1)
+    try:
+        import torch
+        from transformers import VoxtralForConditionalGeneration, AutoProcessor
+        device = get_device()
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        processor = AutoProcessor.from_pretrained(folder)
+        model = VoxtralForConditionalGeneration.from_pretrained(
+            folder, torch_dtype=dtype, device_map=device,
+        )
+    except Exception as e:
+        on_done(False, f"Errore caricamento Voxtral:\n{e}\n\nIl modello potrebbe non essere stato scaricato — usa 'Scarica modello'.", None)
+        return
+
+    on_status("Sbobinatura con Voxtral...")
+    on_progress("Trascrizione...", 0)
+    t0 = time.time()
+    try:
+        conversation = [{
+            "role": "user",
+            "content": [
+                {"type": "audio", "path": audio_path},
+                {"type": "text", "text": "Transcribe the audio in Italian, in the original spoken language. Include all spoken content, preserve dialect, do not summarize."}
+            ]
+        }]
+        inputs = processor.apply_chat_template(
+            conversation, tokenize=True, return_dict=True, return_tensors="pt"
+        )
+        if hasattr(inputs, "to"):
+            inputs = inputs.to(device)
+        outputs = model.generate(**inputs, max_new_tokens=8000, do_sample=False)
+        # Decode SOLO la parte nuova (oltre l'input)
+        new_tokens = outputs[:, inputs["input_ids"].shape[1]:] if isinstance(inputs, dict) else outputs[:, inputs.input_ids.shape[1]:]
+        text = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+    except Exception as e:
+        on_done(False, f"Errore Voxtral:\n{e}", None)
+        return
+
+    elapsed = time.time() - t0
+    on_status("Salvataggio trascrizione...")
+    out_path = os.path.splitext(audio_path)[0] + ".txt"
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        # mostriamo il testo nell'UI come una grande riga
+        for line in text.split("\n"):
+            if line.strip():
+                on_segment(line)
+    except Exception as e:
+        on_done(False, f"Errore salvataggio:\n{e}", None)
+        return
+
+    mins = int(elapsed // 60); secs = int(elapsed % 60)
+    on_progress("Completato!", 100)
+    on_done(True, out_path, f"Voxtral — tempo: {mins}m {secs}s")
+
+
 def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
                diarize_on=False, num_speakers=None,
                normalize_on=False):
@@ -321,6 +437,11 @@ def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
             audio_path, _ = normalize_volume(audio_path, on_status=on_status)
         except Exception as e:
             on_status(f"Normalizzazione fallita ({e}); proseguo con l'originale.")
+
+    # Dispatch al backend appropriato in base al modello scelto
+    info = MODEL_INFO.get(model_name, {})
+    if info.get("engine") == "voxtral":
+        return _transcribe_voxtral(audio_path, model_name, ui_callbacks)
 
     if not check_ffmpeg():
         on_done(False, "ffmpeg non trovato!\n\nMetti ffmpeg.exe nella stessa cartella di Sbobinator.", None)
