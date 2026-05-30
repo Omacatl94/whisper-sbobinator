@@ -9,6 +9,28 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# Workaround: clearvoice tira dentro speechbrain, che ha un LazyModule per
+# k2_fsa. inspect.stack() (chiamato da pyannote/lightning) ne triggera l'import
+# che fallisce perché k2 non è installato. Rendiamo il fallimento "silente"
+# restituendo un modulo stub.
+try:
+    from speechbrain.utils import importutils as _sb_iu
+    _orig_ensure = _sb_iu.LazyModule.ensure_module
+
+    def _safe_ensure(self, stacklevel=1):
+        try:
+            return _orig_ensure(self, stacklevel)
+        except ImportError:
+            import types as _t
+            stub = _t.ModuleType(self.target)
+            stub.__file__ = None
+            self.lazy_module = stub
+            return stub
+
+    _sb_iu.LazyModule.ensure_module = _safe_ensure
+except Exception:
+    pass
+
 # In una build PyInstaller "windowed" (console=False) sys.stdout e sys.stderr
 # valgono None. whisper/tqdm ci scrivono sopra durante la trascrizione e l'app
 # crasha con "NoneType object has no attribute 'write'". Reindirizziamo i
@@ -54,10 +76,13 @@ def model_exists(model_name):
 
 
 def check_ffmpeg():
-    ffmpeg_local = os.path.join(get_base_path(), "ffmpeg.exe")
-    if os.path.isfile(ffmpeg_local):
-        os.environ["PATH"] = get_base_path() + os.pathsep + os.environ.get("PATH", "")
-        return True
+    # Cerca ffmpeg accanto all'exe (build congelata) o in dist/ (dev)
+    candidates = [get_base_path(), os.path.join(get_base_path(), "dist")]
+    for c in candidates:
+        p = os.path.join(c, "ffmpeg.exe")
+        if os.path.isfile(p):
+            os.environ["PATH"] = c + os.pathsep + os.environ.get("PATH", "")
+            return True
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
         return True
@@ -187,6 +212,7 @@ def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
         if on_status:
             on_status("Pulizia rumore (MossFormer2 SE)...")
         audio = enhance_clearvoice(audio, sr=sr)
+        sr = 48000  # MossFormer2_SE_48K esce a 48 kHz
 
     if separate:
         if on_status:
@@ -194,6 +220,7 @@ def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
         streams = separate_clearvoice(audio, sr=sr)
         # Prendiamo lo stream con RMS più alto (voce principale)
         audio = max(streams, key=lambda s: float(np.sqrt(np.mean(s ** 2))))
+        sr = 16000  # MossFormer2_SS_16K opera a 16 kHz
 
     if superres:
         if on_status:
@@ -937,6 +964,40 @@ class App:
 
 
 def main():
+    # Modalità diagnostica per validare l'exe frozen sul PC target.
+    # Uso: Sbobinator.exe --selftest <audio>
+    # Scrive un .selftest.log accanto all'audio, exit 0 se tutto OK.
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        if len(sys.argv) < 3:
+            sys.stderr.write("uso: Sbobinator.exe --selftest <audio>\n") if sys.stderr else None
+            sys.exit(2)
+        audio = sys.argv[2]
+        log_path = os.path.splitext(audio)[0] + ".selftest.log"
+        with open(log_path, "w", encoding="utf-8") as log:
+            def w(msg):
+                log.write(msg + "\n"); log.flush()
+            try:
+                w(f"device: {get_device_info()}")
+                w(f"audio: {audio}")
+                w("checking ffmpeg...")
+                w(f"  found: {check_ffmpeg()}")
+                w("loading audio...")
+                a = load_audio_array(audio)
+                w(f"  samples: {len(a)}")
+                w("denoising (ClearerVoice MossFormer2 SE)...")
+                cleaned = enhance_clearvoice(a)
+                w(f"  cleaned samples: {len(cleaned)}")
+                w("diarizing...")
+                turns = diarize(audio)
+                w(f"  turns: {len(turns)}")
+                w("SELFTEST OK")
+                sys.exit(0)
+            except Exception as e:
+                import traceback
+                w(f"SELFTEST FAIL: {e}")
+                w(traceback.format_exc())
+                sys.exit(1)
+
     if len(sys.argv) > 1:
         audio_path = sys.argv[1]
         if os.path.isfile(audio_path):
