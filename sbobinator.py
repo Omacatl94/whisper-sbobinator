@@ -74,6 +74,13 @@ def get_audio_duration(audio_path):
         return None
 
 
+def load_audio_array(audio_path):
+    """Carica un file audio come numpy float32 mono @ 16 kHz usando ffmpeg.
+    Wrapper di whisper.audio.load_audio per uniformità nella pipeline."""
+    import whisper.audio
+    return whisper.audio.load_audio(audio_path)
+
+
 def get_device():
     """Ritorna 'cuda' se disponibile e funzionante, altrimenti 'cpu'."""
     try:

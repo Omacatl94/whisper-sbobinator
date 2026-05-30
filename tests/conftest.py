@@ -1,4 +1,15 @@
+import os
 import pytest
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _setup_ffmpeg_path():
+    """Aggiunge dist/ al PATH così whisper trova ffmpeg.exe nei test."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dist = os.path.join(repo_root, "dist")
+    if os.path.isdir(dist):
+        os.environ["PATH"] = dist + os.pathsep + os.environ.get("PATH", "")
+    yield
 
 
 @pytest.fixture
