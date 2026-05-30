@@ -9,7 +9,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules, collect_all
 
-datas = collect_data_files('whisper') + [('hf_models', 'hf_models'), ('checkpoints', 'checkpoints')]
+datas = collect_data_files('whisper') + [('hf_models', 'hf_models'), ('checkpoints', 'checkpoints'), ('torch_hub', 'torch_hub')]
 binaries = []
 hiddenimports = collect_submodules('whisper') + [
     'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public',

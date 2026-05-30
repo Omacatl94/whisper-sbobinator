@@ -6,6 +6,7 @@ build/
 models/
 .venv/
 checkpoints/
+torch_hub/
 dist_diar/
 dist_v3/
 build_diar/

@@ -3,7 +3,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, coll
 
 # Whisper carica a runtime mel_filters.npz e i tokenizer (*.tiktoken) dalla sua
 # cartella assets/: vanno raccolti come datas.
-datas = collect_data_files('whisper') + [('hf_models', 'hf_models'), ('checkpoints', 'checkpoints')]
+datas = collect_data_files('whisper') + [('hf_models', 'hf_models'), ('checkpoints', 'checkpoints'), ('torch_hub', 'torch_hub')]
 binaries = []
 hiddenimports = collect_submodules('whisper') + [
     'tiktoken',

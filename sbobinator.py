@@ -56,11 +56,15 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-# Frozen: chdir a _MEIPASS così ClearVoice trova checkpoints/ relativi
+# Frozen: chdir a _MEIPASS così ClearVoice trova checkpoints/ relativi.
+# E punto TORCH_HOME alla cache impacchettata così denoiser (DNS64) carica
+# offline.
 if getattr(sys, "frozen", False):
     _mei = getattr(sys, "_MEIPASS", None)
     if _mei and os.path.isdir(os.path.join(_mei, "checkpoints")):
         os.chdir(_mei)
+    if _mei and os.path.isdir(os.path.join(_mei, "torch_hub")):
+        os.environ["TORCH_HOME"] = os.path.join(_mei, "torch_hub")
 
 MODEL_INFO = {
     "medium": {"label": "Medium (~1.5GB, più veloce)", "file": "medium.pt", "size_gb": 1.5},

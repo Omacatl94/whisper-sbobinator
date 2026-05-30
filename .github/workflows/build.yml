@@ -28,6 +28,9 @@ jobs:
           python -c "from clearvoice import ClearVoice; ClearVoice(task='speech_separation', model_names=['MossFormer2_SS_16K'])"
           python -c "from clearvoice import ClearVoice; ClearVoice(task='speech_super_resolution', model_names=['MossFormer2_SR_48K'])"
           python -c "from denoiser import pretrained; pretrained.dns64()"
+          # Copy torch hub cache (DNS64 model) into repo for bundling
+          New-Item -ItemType Directory -Force -Path "torch_hub\checkpoints" | Out-Null
+          Copy-Item "$env:USERPROFILE\.cache\torch\hub\checkpoints\*" "torch_hub\checkpoints\" -Force
         shell: pwsh
 
       - name: Build EXE
