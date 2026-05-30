@@ -180,6 +180,28 @@ def enhance_clearvoice(audio, sr=16000):
 _fb_denoiser = None
 
 
+def denoise_noisereduce(audio, sr=16000):
+    """Denoising statistico (sottrazione spettrale, non-AI) via noisereduce.
+    Molto conservativo: riduce rumore costante senza tagliare contenuto.
+    Adatto a quando si vuole minima modifica del segnale originale.
+    """
+    import noisereduce as nr
+    # noisereduce funziona meglio con stationary=False per rumore variabile,
+    # e prop_decrease controlla quanto rumore togliere (1.0 = max).
+    reduced = nr.reduce_noise(y=audio, sr=sr, stationary=False, prop_decrease=0.8)
+    return reduced.astype("float32")
+
+
+# Motori di denoising disponibili: id -> (label UI, funzione, output_sr_change)
+# output_sr_change=None significa che l'output sample rate è uguale all'input.
+DENOISE_ENGINES = {
+    "none": ("Nessuno (no preprocess)", None, None),
+    "dns64": ("DNS64 (Facebook, AI leggero)", "denoise_facebook", 16000),
+    "noisereduce": ("Statistico (conservativo)", "denoise_noisereduce", None),
+    "mossformer2": ("MossFormer2 SE (AI aggressivo)", "enhance_clearvoice", 48000),
+}
+
+
 def denoise_facebook(audio, sr=16000):
     """Speech denoising con Facebook Research denoiser (DNS64, DEMUCS-based).
     Addestrato sul DNS Challenge di Microsoft per parlato in rumore reale,
@@ -254,13 +276,15 @@ def super_resolve(audio, sr=16000):
         return _cv_result_to_array(result), 48000
 
 
-def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
-                     on_status=None):
+def preprocess_audio(audio_path, denoise_engine="none", separate=False,
+                     superres=False, on_status=None):
     """Pipeline di pulizia audio. Ritorna (path_processato, sample_rate).
-    Se nessun flag attivo, ritorna (audio_path, 16000) senza toccare il file.
+    denoise_engine: chiave di DENOISE_ENGINES (none/dns64/noisereduce/mossformer2).
+    Se nessun preprocessing attivo, ritorna (audio_path, 16000) senza toccare il file.
     Altrimenti scrive un .cleaned.wav accanto all'audio originale.
     """
-    if not (denoise or separate or superres):
+    use_denoise = denoise_engine and denoise_engine != "none"
+    if not (use_denoise or separate or superres):
         return audio_path, 16000
 
     import os
@@ -271,11 +295,17 @@ def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
     audio = load_audio_array(audio_path)
     sr = 16000
 
-    if denoise:
+    if use_denoise:
+        eng = DENOISE_ENGINES.get(denoise_engine)
+        if eng is None:
+            raise ValueError(f"denoise engine sconosciuto: {denoise_engine}")
+        label, func_name, out_sr = eng
         if on_status:
-            on_status("Pulizia rumore (Facebook DNS64)...")
-        audio = denoise_facebook(audio, sr=sr)
-        sr = 16000  # DNS64 esce sempre a 16 kHz
+            on_status(f"Pulizia rumore ({label})...")
+        func = globals()[func_name]
+        audio = func(audio, sr=sr)
+        if out_sr is not None:
+            sr = out_sr
 
     if separate:
         if on_status:
@@ -462,15 +492,15 @@ def diarize(audio_path, num_speakers=None, on_status=None):
 
 def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
                diarize_on=False, num_speakers=None,
-               denoise_on=False, separate_on=False, superres_on=False):
+               denoise_engine="none", separate_on=False, superres_on=False):
     on_status, on_progress, on_segment, on_done = ui_callbacks
 
     # Pipeline di pulizia audio opzionale (eseguita PRIMA della trascrizione)
-    if denoise_on or separate_on or superres_on:
+    if (denoise_engine and denoise_engine != "none") or separate_on or superres_on:
         try:
             audio_path, _sr = preprocess_audio(
                 audio_path,
-                denoise=denoise_on,
+                denoise_engine=denoise_engine,
                 separate=separate_on,
                 superres=superres_on,
                 on_status=on_status,
@@ -746,11 +776,15 @@ class App:
 
         adv_row = tk.Frame(frame, bg=CARA_BLU)
         adv_row.pack(fill="x", pady=(0, 8))
-        self.denoise_var = tk.BooleanVar(value=False)
+        tk.Label(adv_row, text="Denoise:", font=("Arial", 9),
+                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
+        self.denoise_engine_var = tk.StringVar(value="dns64")
+        ttk.Combobox(adv_row, textvariable=self.denoise_engine_var, width=22,
+                     state="readonly",
+                     values=[k for k in DENOISE_ENGINES.keys()]).pack(side="left", padx=(4, 12))
         self.separate_var = tk.BooleanVar(value=False)
         self.superres_var = tk.BooleanVar(value=False)
-        for var, text in [(self.denoise_var, "Denoise"),
-                          (self.separate_var, "Separa voci"),
+        for var, text in [(self.separate_var, "Separa voci"),
                           (self.superres_var, "Super-res")]:
             tk.Checkbutton(adv_row, text=text, variable=var, font=("Arial", 9),
                            bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
@@ -962,14 +996,14 @@ class App:
             self.root.after(0, update)
 
         callbacks = (on_status, on_progress, on_segment, on_done)
-        denoise_on = self.denoise_var.get()
+        denoise_engine = self.denoise_engine_var.get()
         separate_on = self.separate_var.get()
         superres_on = self.superres_var.get()
         t = threading.Thread(
             target=transcribe,
             args=(path, model_name, callbacks, resume_from,
                   diarize_on, num_speakers,
-                  denoise_on, separate_on, superres_on),
+                  denoise_engine, separate_on, superres_on),
             daemon=True,
         )
         t.start()
@@ -977,18 +1011,20 @@ class App:
     def _on_profile_change(self):
         p = self.profile_var.get()
         if p == "standard":
-            self.denoise_var.set(False)
+            self.denoise_engine_var.set("none")
             self.separate_var.set(False)
             self.superres_var.set(False)
         elif p == "intercettazione":
-            self.denoise_var.set(True)
+            # leggero + separazione voci (default sensato per intercettazione)
+            self.denoise_engine_var.set("noisereduce")
             self.separate_var.set(True)
             self.superres_var.set(False)
         elif p == "max":
-            self.denoise_var.set(True)
+            # AI leggero, separazione, super-res (no MossFormer aggressivo)
+            self.denoise_engine_var.set("dns64")
             self.separate_var.set(True)
             self.superres_var.set(True)
-        # advanced: lascia le spunte come sono
+        # advanced: lascia le scelte come sono
 
     def rename_speakers(self):
         import re
@@ -1054,8 +1090,8 @@ def main():
                 w("loading audio...")
                 a = load_audio_array(audio)
                 w(f"  samples: {len(a)}")
-                w("denoising (ClearerVoice MossFormer2 SE)...")
-                cleaned = enhance_clearvoice(a)
+                w("denoising (Facebook DNS64)...")
+                cleaned = denoise_facebook(a)
                 w(f"  cleaned samples: {len(cleaned)}")
                 w("diarizing...")
                 turns = diarize(audio)

@@ -22,7 +22,7 @@ for pkg in [
     'asteroid_filterbanks', 'torch_audiomentations',
     'pytorch_lightning', 'lightning_fabric', 'lightning',
     'speechbrain', 'huggingface_hub',
-    'clearvoice', 'denoiser', 'librosa', 'soundfile', 'sounddevice',
+    'clearvoice', 'denoiser', 'noisereduce', 'librosa', 'soundfile', 'sounddevice',
 ]:
     try:
         d, b, h = collect_all(pkg)

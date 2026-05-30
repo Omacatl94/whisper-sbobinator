@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio torchvision
-          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" clearvoice denoiser sounddevice soundfile
+          pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" clearvoice denoiser noisereduce sounddevice soundfile
 
       - name: Pre-download ClearerVoice models (SE + SS + SR per offline)
         run: |

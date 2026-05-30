@@ -5,6 +5,7 @@ torch
 torchaudio
 clearvoice
 denoiser
+noisereduce
 sounddevice
 soundfile
 --extra-index-url https://download.pytorch.org/whl/cu128
