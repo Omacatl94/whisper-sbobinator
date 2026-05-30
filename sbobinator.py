@@ -384,24 +384,31 @@ def _transcribe_voxtral(audio_path, model_name, ui_callbacks):
     on_progress("Trascrizione...", 0)
     t0 = time.time()
     try:
-        conversation = [{
-            "role": "user",
-            "content": [
-                {"type": "audio", "path": audio_path},
-                {"type": "text", "text": "Transcribe the audio in Italian, in the original spoken language. Include all spoken content, preserve dialect, do not summarize."}
-            ]
-        }]
-        inputs = processor.apply_chat_template(
-            conversation, tokenize=True, return_dict=True, return_tensors="pt"
+        # Carichiamo audio via whisper/ffmpeg (gestisce mp3/m4a/ogg/wav)
+        # e lo passiamo a Voxtral come numpy (soundfile non gestisce m4a).
+        audio_np = load_audio_array(audio_path)  # float32 mono @ 16 kHz
+        # Il processor vuole audio come lista + format come lista (anche per
+        # un solo file). Passare numpy singolo causa "len(None)" bug.
+        inputs = processor.apply_transcription_request(
+            audio=[audio_np],
+            model_id=info["hf_id"],
+            language=["it"],
+            sampling_rate=16000,
+            format=["wav"],
         )
         if hasattr(inputs, "to"):
-            inputs = inputs.to(device)
+            inputs = inputs.to(device, dtype=dtype if dtype != torch.float32 else None)
+        else:
+            # dict di tensor
+            inputs = {k: (v.to(device) if hasattr(v, "to") else v) for k, v in inputs.items()}
         outputs = model.generate(**inputs, max_new_tokens=8000, do_sample=False)
-        # Decode SOLO la parte nuova (oltre l'input)
-        new_tokens = outputs[:, inputs["input_ids"].shape[1]:] if isinstance(inputs, dict) else outputs[:, inputs.input_ids.shape[1]:]
+        # Decode tutto, poi prendiamo il testo
+        input_len = inputs["input_ids"].shape[1] if isinstance(inputs, dict) else inputs.input_ids.shape[1]
+        new_tokens = outputs[:, input_len:]
         text = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
     except Exception as e:
-        on_done(False, f"Errore Voxtral:\n{e}", None)
+        import traceback
+        on_done(False, f"Errore Voxtral:\n{e}\n\n{traceback.format_exc()[:500]}", None)
         return
 
     elapsed = time.time() - t0
