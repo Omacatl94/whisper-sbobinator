@@ -4,6 +4,7 @@ pyannote.audio==4.0.4
 torch
 torchaudio
 clearvoice
+denoiser
 sounddevice
 soundfile
 --extra-index-url https://download.pytorch.org/whl/cu128

@@ -156,8 +156,10 @@ def _cv_result_to_array(result):
 
 
 def enhance_clearvoice(audio, sr=16000):
-    """Speech enhancement (denoising) con ClearVoice MossFormer2 SE 48K.
-    audio: numpy float32 mono. Ritorna numpy float32 mono @ sr."""
+    """[DEPRECATO] Speech enhancement con ClearVoice MossFormer2 SE 48K.
+    Si è dimostrato troppo aggressivo (taglia il 43% del file in silenzio).
+    Mantenuto per compatibilità, ma preprocess_audio ora usa denoise_facebook.
+    """
     global _cv_se
     import tempfile
     from clearvoice import ClearVoice
@@ -168,6 +170,41 @@ def enhance_clearvoice(audio, sr=16000):
         in_path = _save_temp_wav(audio, sr, td)
         result = _cv_se(input_path=in_path, online_write=False)
         return _cv_result_to_array(result)
+
+
+# Cache del modello denoiser Facebook (DEMUCS-based, raw waveform)
+_fb_denoiser = None
+
+
+def denoise_facebook(audio, sr=16000):
+    """Speech denoising con Facebook Research denoiser (DNS64, DEMUCS-based).
+    Addestrato sul DNS Challenge di Microsoft per parlato in rumore reale,
+    PRESERVA il contenuto vocale (a differenza di MossFormer2 SE).
+    Input/output @ 16 kHz mono float32.
+    """
+    global _fb_denoiser
+    import torch
+    import numpy as np
+
+    device = get_device()
+    if _fb_denoiser is None:
+        from denoiser import pretrained
+        _fb_denoiser = pretrained.dns64()
+        _fb_denoiser.to(device).eval()
+
+    # input: numpy mono @ sr -> torch tensor (1, T) @ 16kHz richiesto
+    if sr != _fb_denoiser.sample_rate:
+        import torchaudio
+        wav = torch.from_numpy(audio).unsqueeze(0)
+        wav = torchaudio.functional.resample(wav, sr, _fb_denoiser.sample_rate)
+    else:
+        wav = torch.from_numpy(audio).unsqueeze(0)
+
+    wav = wav.to(device)
+    with torch.no_grad():
+        # input shape (batch, channels, time)
+        denoised = _fb_denoiser(wav.unsqueeze(0))[0, 0]
+    return denoised.cpu().numpy().astype("float32")
 
 
 def separate_clearvoice(audio, sr=16000):
@@ -232,17 +269,24 @@ def preprocess_audio(audio_path, denoise=False, separate=False, superres=False,
 
     if denoise:
         if on_status:
-            on_status("Pulizia rumore (MossFormer2 SE)...")
-        audio = enhance_clearvoice(audio, sr=sr)
-        sr = 48000  # MossFormer2_SE_48K esce a 48 kHz
+            on_status("Pulizia rumore (Facebook DNS64)...")
+        audio = denoise_facebook(audio, sr=sr)
+        sr = 16000  # DNS64 esce sempre a 16 kHz
 
     if separate:
         if on_status:
             on_status("Separazione voci sovrapposte...")
+        # Se siamo a 48 kHz, MossFormer2_SS_16K vuole 16 kHz: resample qui
+        if sr != 16000:
+            import torchaudio
+            import torch
+            t = torch.from_numpy(audio).unsqueeze(0)
+            t = torchaudio.functional.resample(t, sr, 16000)
+            audio = t.squeeze(0).numpy()
+            sr = 16000
         streams = separate_clearvoice(audio, sr=sr)
         # Prendiamo lo stream con RMS più alto (voce principale)
         audio = max(streams, key=lambda s: float(np.sqrt(np.mean(s ** 2))))
-        sr = 16000  # MossFormer2_SS_16K opera a 16 kHz
 
     if superres:
         if on_status:
