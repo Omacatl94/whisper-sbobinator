@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --index-url https://download.pytorch.org/whl/cu124 torch torchaudio
+          pip install --index-url https://download.pytorch.org/whl/cu128 torch torchaudio
           pip install openai-whisper pyinstaller tiktoken "pyannote.audio==4.0.4" clearvoice sounddevice soundfile
 
       - name: Pre-download ClearerVoice models
