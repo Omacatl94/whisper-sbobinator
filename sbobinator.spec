@@ -3,7 +3,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules, coll
 
 # Whisper carica a runtime mel_filters.npz e i tokenizer (*.tiktoken) dalla sua
 # cartella assets/: vanno raccolti come datas.
-datas = collect_data_files('whisper') + [('hf_models', 'hf_models'), ('checkpoints', 'checkpoints'), ('torch_hub', 'torch_hub')]
+# hf_models = modelli pyannote bundled per diarization offline.
+datas = collect_data_files('whisper') + [('hf_models', 'hf_models')]
 binaries = []
 hiddenimports = collect_submodules('whisper') + [
     'tiktoken',
@@ -11,7 +12,7 @@ hiddenimports = collect_submodules('whisper') + [
     'tiktoken_ext.openai_public',
 ]
 
-# pyannote.audio e le sue dipendenze: raccogli dati, binari e import nascosti.
+# pyannote.audio e dipendenze: raccogli dati, binari e import nascosti.
 # I pacchetti non installati vengono semplicemente ignorati.
 for pkg in [
     'pyannote.audio', 'pyannote.core', 'pyannote.pipeline',
@@ -20,8 +21,7 @@ for pkg in [
     'asteroid_filterbanks', 'torch_audiomentations',
     'pytorch_lightning', 'lightning_fabric', 'lightning',
     'speechbrain', 'huggingface_hub',
-    'clearvoice', 'denoiser', 'noisereduce', 'librosa', 'soundfile', 'sounddevice',
-    'opencv-python', 'modelscope',
+    'soundfile', 'sounddevice',
 ]:
     try:
         d, b, h = collect_all(pkg)

@@ -56,15 +56,7 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-# Frozen: chdir a _MEIPASS così ClearVoice trova checkpoints/ relativi.
-# E punto TORCH_HOME alla cache impacchettata così denoiser (DNS64) carica
-# offline.
-if getattr(sys, "frozen", False):
-    _mei = getattr(sys, "_MEIPASS", None)
-    if _mei and os.path.isdir(os.path.join(_mei, "checkpoints")):
-        os.chdir(_mei)
-    if _mei and os.path.isdir(os.path.join(_mei, "torch_hub")):
-        os.environ["TORCH_HOME"] = os.path.join(_mei, "torch_hub")
+# Frozen: niente più chdir/TORCH_HOME (era per ClearVoice/DNS64, droppati)
 
 MODEL_INFO = {
     "medium": {"label": "Medium (~1.5GB, più veloce)", "file": "medium.pt", "size_gb": 1.5},
@@ -132,204 +124,29 @@ def load_audio_array(audio_path):
     return whisper.audio.load_audio(audio_path)
 
 
-# Cache dei modelli ClearVoice per evitare reload ad ogni chiamata
-_cv_se = None
-_cv_ss = None
-_cv_sr = None
-
-
-def _save_temp_wav(audio, sr, td, name="in.wav"):
-    """Salva un array numpy come WAV temporaneo. Ritorna il path."""
+def normalize_volume(audio_path, on_status=None):
+    """Normalizzazione dinamica del volume con ffmpeg dynaudnorm.
+    Alza zone con livello basso senza saturare le alte. NON modifica lo
+    spettro, solo l'ampiezza nel tempo → SAFE per Whisper/ASR moderni.
+    Da usare solo se l'audio originale ha grandi variazioni di livello
+    (es. sussurri + parlato normale). Sull'audio già bilanciato non serve
+    e può essere disattivata.
+    """
+    import subprocess
     import os
-    import soundfile as sf
-    path = os.path.join(td, name)
-    sf.write(path, audio, sr)
-    return path
-
-
-def _cv_result_to_array(result):
-    """Converte il risultato di ClearVoice in numpy float32 mono."""
-    import numpy as np
-    if isinstance(result, dict):
-        # Prendiamo il primo valore (single-model case)
-        result = list(result.values())[0]
-    if hasattr(result, "numpy"):
-        result = result.numpy()
-    arr = np.asarray(result, dtype="float32").squeeze()
-    return arr
-
-
-def enhance_clearvoice(audio, sr=16000):
-    """[DEPRECATO] Speech enhancement con ClearVoice MossFormer2 SE 48K.
-    Si è dimostrato troppo aggressivo (taglia il 43% del file in silenzio).
-    Mantenuto per compatibilità, ma preprocess_audio ora usa denoise_facebook.
-    """
-    global _cv_se
-    import tempfile
-    from clearvoice import ClearVoice
-    if _cv_se is None:
-        _cv_se = ClearVoice(task="speech_enhancement",
-                            model_names=["MossFormer2_SE_48K"])
-    with tempfile.TemporaryDirectory() as td:
-        in_path = _save_temp_wav(audio, sr, td)
-        result = _cv_se(input_path=in_path, online_write=False)
-        return _cv_result_to_array(result)
-
-
-# Cache del modello denoiser Facebook (DEMUCS-based, raw waveform)
-_fb_denoiser = None
-
-
-def denoise_noisereduce(audio, sr=16000):
-    """Denoising statistico (sottrazione spettrale, non-AI) via noisereduce.
-    Molto conservativo: riduce rumore costante senza tagliare contenuto.
-    Adatto a quando si vuole minima modifica del segnale originale.
-    """
-    import noisereduce as nr
-    # noisereduce funziona meglio con stationary=False per rumore variabile,
-    # e prop_decrease controlla quanto rumore togliere (1.0 = max).
-    reduced = nr.reduce_noise(y=audio, sr=sr, stationary=False, prop_decrease=0.8)
-    return reduced.astype("float32")
-
-
-# Motori di denoising disponibili: id -> (label UI, funzione, output_sr_change)
-# output_sr_change=None significa che l'output sample rate è uguale all'input.
-DENOISE_ENGINES = {
-    "none": ("Nessuno (no preprocess)", None, None),
-    "dns64": ("DNS64 (Facebook, AI leggero)", "denoise_facebook", 16000),
-    "noisereduce": ("Statistico (conservativo)", "denoise_noisereduce", None),
-    "mossformer2": ("MossFormer2 SE (AI aggressivo)", "enhance_clearvoice", 48000),
-}
-
-
-def denoise_facebook(audio, sr=16000):
-    """Speech denoising con Facebook Research denoiser (DNS64, DEMUCS-based).
-    Addestrato sul DNS Challenge di Microsoft per parlato in rumore reale,
-    PRESERVA il contenuto vocale (a differenza di MossFormer2 SE).
-    Input/output @ 16 kHz mono float32.
-    """
-    global _fb_denoiser
-    import torch
-    import numpy as np
-
-    device = get_device()
-    if _fb_denoiser is None:
-        from denoiser import pretrained
-        _fb_denoiser = pretrained.dns64()
-        _fb_denoiser.to(device).eval()
-
-    # input: numpy mono @ sr -> torch tensor (1, T) @ 16kHz richiesto
-    if sr != _fb_denoiser.sample_rate:
-        import torchaudio
-        wav = torch.from_numpy(audio).unsqueeze(0)
-        wav = torchaudio.functional.resample(wav, sr, _fb_denoiser.sample_rate)
-    else:
-        wav = torch.from_numpy(audio).unsqueeze(0)
-
-    wav = wav.to(device)
-    with torch.no_grad():
-        # input shape (batch, channels, time)
-        denoised = _fb_denoiser(wav.unsqueeze(0))[0, 0]
-    return denoised.cpu().numpy().astype("float32")
-
-
-def separate_clearvoice(audio, sr=16000):
-    """Separazione di voci sovrapposte con MossFormer2 SS 16K.
-    Ritorna lista di numpy float32 (uno per voce)."""
-    global _cv_ss
-    import tempfile
-    import numpy as np
-    from clearvoice import ClearVoice
-    if _cv_ss is None:
-        _cv_ss = ClearVoice(task="speech_separation",
-                            model_names=["MossFormer2_SS_16K"])
-    with tempfile.TemporaryDirectory() as td:
-        in_path = _save_temp_wav(audio, sr, td)
-        result = _cv_ss(input_path=in_path, online_write=False)
-        # speech_separation ritorna dict di N stream (uno per voce) o lista
-        if isinstance(result, dict):
-            streams = list(result.values())
-        elif isinstance(result, (list, tuple)):
-            streams = list(result)
-        else:
-            streams = [result]
-        out = []
-        for s in streams:
-            if hasattr(s, "numpy"):
-                s = s.numpy()
-            out.append(np.asarray(s, dtype="float32").squeeze())
-        return out
-
-
-def super_resolve(audio, sr=16000):
-    """Super-risoluzione: porta audio a 48 kHz con MossFormer2 SR.
-    Ritorna (audio_48k, 48000)."""
-    global _cv_sr
-    import tempfile
-    from clearvoice import ClearVoice
-    if _cv_sr is None:
-        _cv_sr = ClearVoice(task="speech_super_resolution",
-                            model_names=["MossFormer2_SR_48K"])
-    with tempfile.TemporaryDirectory() as td:
-        in_path = _save_temp_wav(audio, sr, td)
-        result = _cv_sr(input_path=in_path, online_write=False)
-        return _cv_result_to_array(result), 48000
-
-
-def preprocess_audio(audio_path, denoise_engine="none", separate=False,
-                     superres=False, on_status=None):
-    """Pipeline di pulizia audio. Ritorna (path_processato, sample_rate).
-    denoise_engine: chiave di DENOISE_ENGINES (none/dns64/noisereduce/mossformer2).
-    Se nessun preprocessing attivo, ritorna (audio_path, 16000) senza toccare il file.
-    Altrimenti scrive un .cleaned.wav accanto all'audio originale.
-    """
-    use_denoise = denoise_engine and denoise_engine != "none"
-    if not (use_denoise or separate or superres):
-        return audio_path, 16000
-
-    import os
-    import soundfile as sf
-    import numpy as np
-
     base, _ = os.path.splitext(audio_path)
-    audio = load_audio_array(audio_path)
-    sr = 16000
-
-    if use_denoise:
-        eng = DENOISE_ENGINES.get(denoise_engine)
-        if eng is None:
-            raise ValueError(f"denoise engine sconosciuto: {denoise_engine}")
-        label, func_name, out_sr = eng
-        if on_status:
-            on_status(f"Pulizia rumore ({label})...")
-        func = globals()[func_name]
-        audio = func(audio, sr=sr)
-        if out_sr is not None:
-            sr = out_sr
-
-    if separate:
-        if on_status:
-            on_status("Separazione voci sovrapposte...")
-        # Se siamo a 48 kHz, MossFormer2_SS_16K vuole 16 kHz: resample qui
-        if sr != 16000:
-            import torchaudio
-            import torch
-            t = torch.from_numpy(audio).unsqueeze(0)
-            t = torchaudio.functional.resample(t, sr, 16000)
-            audio = t.squeeze(0).numpy()
-            sr = 16000
-        streams = separate_clearvoice(audio, sr=sr)
-        # Prendiamo lo stream con RMS più alto (voce principale)
-        audio = max(streams, key=lambda s: float(np.sqrt(np.mean(s ** 2))))
-
-    if superres:
-        if on_status:
-            on_status("Super-risoluzione audio...")
-        audio, sr = super_resolve(audio, sr=sr)
-
-    out_path = base + ".cleaned.wav"
-    sf.write(out_path, audio, sr)
-    return out_path, sr
+    out_path = base + ".normalized.wav"
+    if on_status:
+        on_status("Normalizzazione volume...")
+    # dynaudnorm parametri standard per voce (frame 150ms, gauss 15)
+    cmd = [
+        "ffmpeg", "-y", "-i", audio_path,
+        "-af", "dynaudnorm=f=150:g=15",
+        "-ar", "16000", "-ac", "1",
+        out_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return out_path, 16000
 
 
 def get_device():
@@ -492,21 +309,18 @@ def diarize(audio_path, num_speakers=None, on_status=None):
 
 def transcribe(audio_path, model_name, ui_callbacks, resume_from=0.0,
                diarize_on=False, num_speakers=None,
-               denoise_engine="none", separate_on=False, superres_on=False):
+               normalize_on=False):
     on_status, on_progress, on_segment, on_done = ui_callbacks
 
-    # Pipeline di pulizia audio opzionale (eseguita PRIMA della trascrizione)
-    if (denoise_engine and denoise_engine != "none") or separate_on or superres_on:
+    # Normalizzazione volume opzionale (NON denoise — solo livello).
+    # I modelli ASR moderni (Whisper, Voxtral) sono stati addestrati su audio
+    # raw rumoroso: pre-processarli col denoise di solito PEGGIORA i risultati.
+    # La normalizzazione del volume invece è "safe" perché non altera lo spettro.
+    if normalize_on:
         try:
-            audio_path, _sr = preprocess_audio(
-                audio_path,
-                denoise_engine=denoise_engine,
-                separate=separate_on,
-                superres=superres_on,
-                on_status=on_status,
-            )
+            audio_path, _ = normalize_volume(audio_path, on_status=on_status)
         except Exception as e:
-            on_status(f"Pulizia audio fallita ({e}); proseguo con l'audio originale.")
+            on_status(f"Normalizzazione fallita ({e}); proseguo con l'originale.")
 
     if not check_ffmpeg():
         on_done(False, "ffmpeg non trovato!\n\nMetti ffmpeg.exe nella stessa cartella di Sbobinator.", None)
@@ -776,20 +590,12 @@ class App:
 
         adv_row = tk.Frame(frame, bg=CARA_BLU)
         adv_row.pack(fill="x", pady=(0, 8))
-        tk.Label(adv_row, text="Denoise:", font=("Arial", 9),
-                 fg=CARA_TXT, bg=CARA_BLU).pack(side="left")
-        self.denoise_engine_var = tk.StringVar(value="dns64")
-        ttk.Combobox(adv_row, textvariable=self.denoise_engine_var, width=22,
-                     state="readonly",
-                     values=[k for k in DENOISE_ENGINES.keys()]).pack(side="left", padx=(4, 12))
-        self.separate_var = tk.BooleanVar(value=False)
-        self.superres_var = tk.BooleanVar(value=False)
-        for var, text in [(self.separate_var, "Separa voci"),
-                          (self.superres_var, "Super-res")]:
-            tk.Checkbutton(adv_row, text=text, variable=var, font=("Arial", 9),
-                           bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
-                           activebackground=CARA_BLU, activeforeground=CARA_ORO,
-                           highlightthickness=0).pack(side="left", padx=(8, 0))
+        self.normalize_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(adv_row, text="Normalizza volume (opzionale, per audio con livelli variabili)",
+                       variable=self.normalize_var, font=("Arial", 9),
+                       bg=CARA_BLU, fg=CARA_TXT, selectcolor=CARA_BLU_SCURO,
+                       activebackground=CARA_BLU, activeforeground=CARA_ORO,
+                       highlightthickness=0).pack(side="left")
 
         btn_row = tk.Frame(frame, bg=CARA_BLU)
         btn_row.pack(fill="x", pady=(0, 10))
@@ -996,35 +802,28 @@ class App:
             self.root.after(0, update)
 
         callbacks = (on_status, on_progress, on_segment, on_done)
-        denoise_engine = self.denoise_engine_var.get()
-        separate_on = self.separate_var.get()
-        superres_on = self.superres_var.get()
+        normalize_on = self.normalize_var.get()
         t = threading.Thread(
             target=transcribe,
             args=(path, model_name, callbacks, resume_from,
-                  diarize_on, num_speakers,
-                  denoise_engine, separate_on, superres_on),
+                  diarize_on, num_speakers, normalize_on),
             daemon=True,
         )
         t.start()
 
     def _on_profile_change(self):
+        # Con l'app snellita (solo ASR raw + opzionale normalizzazione)
+        # i profili si limitano a impostare normalize on/off.
+        # Whisper/Voxtral sono stati addestrati su audio raw — non serve
+        # ripulire ulteriormente, peggiorerebbe i risultati.
         p = self.profile_var.get()
         if p == "standard":
-            self.denoise_engine_var.set("none")
-            self.separate_var.set(False)
-            self.superres_var.set(False)
+            self.normalize_var.set(False)
         elif p == "intercettazione":
-            # leggero + separazione voci (default sensato per intercettazione)
-            self.denoise_engine_var.set("noisereduce")
-            self.separate_var.set(True)
-            self.superres_var.set(False)
+            self.normalize_var.set(True)  # tipico forense: livelli variabili
         elif p == "max":
-            # AI leggero, separazione, super-res (no MossFormer aggressivo)
-            self.denoise_engine_var.set("dns64")
-            self.separate_var.set(True)
-            self.superres_var.set(True)
-        # advanced: lascia le scelte come sono
+            self.normalize_var.set(True)
+        # advanced: lascia la scelta com'è
 
     def rename_speakers(self):
         import re
@@ -1090,9 +889,8 @@ def main():
                 w("loading audio...")
                 a = load_audio_array(audio)
                 w(f"  samples: {len(a)}")
-                w("denoising (Facebook DNS64)...")
-                cleaned = denoise_facebook(a)
-                w(f"  cleaned samples: {len(cleaned)}")
+                # niente denoise nello stack v3 snellito — Whisper/Voxtral raw
+                w("(skip denoise — app snellita)")
                 w("diarizing...")
                 turns = diarize(audio)
                 w(f"  turns: {len(turns)}")
