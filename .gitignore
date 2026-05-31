@@ -17,4 +17,5 @@ archive_v3.txt
 *.normalized.wav
 dist_dev/
 build_dev/
+build_dev.log
 verbalia_debug.log
