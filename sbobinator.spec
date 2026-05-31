@@ -10,6 +10,7 @@ hiddenimports = collect_submodules('whisper') + [
     'tiktoken',
     'tiktoken_ext',
     'tiktoken_ext.openai_public',
+    'transcript_editor',
 ]
 
 # pyannote.audio e dipendenze: raccogli dati, binari e import nascosti.

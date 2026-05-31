@@ -1000,6 +1000,7 @@ class App:
                             style="Verb.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-1>", self._on_queue_double_click)
         vsb.pack(side="right", fill="y")
 
         actions = tk.Frame(inner, bg=SURFACE)
@@ -1261,6 +1262,35 @@ class App:
         self.queue_count.config(
             text=f"{total} file  ·  {pending} in attesa  ·  {done} completati"
         )
+
+    def _editor_style(self):
+        return {"bg": BG, "surface": SURFACE, "surface2": SURFACE_2, "txt": TXT,
+                "txt_muted": TXT_MUTED, "accent": ACCENT, "border": BORDER,
+                "ok": OK, "warn": WARN, "font": FONT}
+
+    def _on_queue_double_click(self, event):
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        idx = self.row_to_index.get(iid)
+        if idx is None:
+            return
+        it = self.items[idx]
+        if it.state != ST_DONE:
+            messagebox.showinfo(
+                APP_NAME, "Trascrivi prima questo file, poi potrai correggerlo.")
+            return
+        txt = os.path.splitext(it.path)[0] + ".txt"
+        if not os.path.isfile(txt):
+            messagebox.showwarning(APP_NAME, "File .txt della trascrizione non trovato.")
+            return
+        try:
+            import transcript_editor
+            transcript_editor.open_editor(self.root, it.path, txt,
+                                          style=self._editor_style())
+        except Exception as e:
+            log_exception("Apertura editor trascrizione fallita", e)
+            messagebox.showerror(APP_NAME, f"Impossibile aprire l'editor:\n{e}")
 
     def _update_item_state(self, idx, state):
         self.items[idx].state = state

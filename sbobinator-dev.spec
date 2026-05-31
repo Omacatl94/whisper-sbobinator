@@ -10,6 +10,7 @@ datas = collect_data_files('whisper') + [('hf_models', 'hf_models')]
 binaries = []
 hiddenimports = collect_submodules('whisper') + [
     'tiktoken', 'tiktoken_ext', 'tiktoken_ext.openai_public',
+    'transcript_editor',
 ]
 
 for pkg in [
