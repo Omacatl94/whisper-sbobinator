@@ -1003,6 +1003,12 @@ class App:
         self.tree.bind("<Double-1>", self._on_queue_double_click)
         vsb.pack(side="right", fill="y")
 
+        tk.Label(inner,
+                 text="Suggerimento: doppio click su un file completato per "
+                      "riascoltare gli spezzoni e correggere il testo.",
+                 font=(FONT, 9), fg=TXT_MUTED, bg=SURFACE,
+                 anchor="w", justify="left").pack(fill="x", pady=(0, 8))
+
         actions = tk.Frame(inner, bg=SURFACE)
         actions.pack(fill="x")
         FlatButton(actions, "Aggiungi file", self.add_files,
@@ -1286,8 +1292,11 @@ class App:
             return
         try:
             import transcript_editor
-            transcript_editor.open_editor(self.root, it.path, txt,
-                                          style=self._editor_style())
+            log_event(f"Editor aperto: {os.path.basename(it.path)}")
+            transcript_editor.open_editor(
+                self.root, it.path, txt, style=self._editor_style(),
+                on_saved=lambda p: log_event(
+                    f"Trascrizione modificata e salvata: {os.path.basename(p)}"))
         except Exception as e:
             log_exception("Apertura editor trascrizione fallita", e)
             messagebox.showerror(APP_NAME, f"Impossibile aprire l'editor:\n{e}")

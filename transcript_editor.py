@@ -75,10 +75,12 @@ _DEFAULT_STYLE = {
 }
 
 
-def open_editor(root, audio_path, txt_path, style=None):
+def open_editor(root, audio_path, txt_path, style=None, on_saved=None):
     """Apre la finestra di revisione/correzione per un file completato.
 
     Ritorna la Toplevel (utile ai test). L'audio si carica al primo play.
+    on_saved(txt_path): callback opzionale invocato dopo un salvataggio riuscito
+    (l'app lo usa per tracciare la modifica nel log di esecuzione).
     """
     st = dict(_DEFAULT_STYLE, **(style or {}))
     with open(txt_path, "r", encoding="utf-8") as f:
@@ -138,7 +140,7 @@ def open_editor(root, audio_path, txt_path, style=None):
         ts = f"{_fmt_ts(seg['start'])}-{_fmt_ts(seg['end'])}"
         tk.Label(row, text=ts, width=12, font=("Consolas", 9),
                  fg=st["txt_muted"], bg=st["bg"]).pack(side="left")
-        var = tk.StringVar(value=seg["text"])
+        var = tk.StringVar(master=win, value=seg["text"])
         ent = tk.Entry(row, textvariable=var, font=(st["font"], 10),
                        bg=st["surface"], fg=st["txt"], insertbackground=st["txt"],
                        relief="flat")
@@ -151,6 +153,11 @@ def open_editor(root, audio_path, txt_path, style=None):
         try:
             with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(serialize_segments(edited))
+            if on_saved:
+                try:
+                    on_saved(txt_path)
+                except Exception:
+                    pass
             messagebox.showinfo(win.title(), "Trascrizione salvata.")
         except Exception as e:
             messagebox.showwarning(win.title(), f"Salvataggio fallito:\n{e}")

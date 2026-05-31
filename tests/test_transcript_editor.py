@@ -1,4 +1,20 @@
+import pytest
+
 import transcript_editor as te
+
+
+@pytest.fixture(scope="module")
+def tk_root():
+    """Un unico root Tk per tutto il modulo: creare più Tk() nello stesso
+    processo fa fallire l'init di Tcl (init.tcl). L'app reale ha un solo root."""
+    import tkinter as tk
+    root = tk.Tk()
+    root.withdraw()
+    yield root
+    try:
+        root.destroy()
+    except Exception:
+        pass
 
 
 def test_parse_basic_line():
@@ -56,17 +72,44 @@ def test_play_segment_slices_and_plays(monkeypatch):
     assert played["len"] == 16000 * 3   # 3 secondi
 
 
-def test_open_editor_builds_without_error(tmp_path):
-    import tkinter as tk
+def test_open_editor_builds_without_error(tk_root, tmp_path):
     txt = tmp_path / "a.txt"
     txt.write_text("[00:00 - 00:04] uno\n[00:04 - 00:08] due\n", encoding="utf-8")
-    root = tk.Tk()
-    root.withdraw()
+    win = te.open_editor(tk_root, str(tmp_path / "a.wav"), str(txt))
+    win.withdraw()
+    tk_root.update_idletasks()
+    tk_root.update()
     try:
-        win = te.open_editor(root, str(tmp_path / "a.wav"), str(txt))
-        win.withdraw()
-        root.update_idletasks()
-        root.update()
         assert win.winfo_exists()
     finally:
-        root.destroy()
+        win.destroy()
+
+
+def _walk(widget):
+    yield widget
+    for child in widget.winfo_children():
+        yield from _walk(child)
+
+
+def test_editor_save_rewrites_txt_and_calls_on_saved(tk_root, tmp_path, monkeypatch):
+    import tkinter as tk
+    monkeypatch.setattr(te.messagebox, "showinfo", lambda *a, **k: None)
+    txt = tmp_path / "a.txt"
+    txt.write_text("[00:00 - 00:04] vecchio\n", encoding="utf-8")
+    saved = {}
+    win = te.open_editor(tk_root, str(tmp_path / "a.wav"), str(txt),
+                         on_saved=lambda p: saved.update(path=p))
+    win.withdraw()
+    tk_root.update_idletasks()
+    tk_root.update()
+    try:
+        entry = next(w for w in _walk(win) if isinstance(w, tk.Entry))
+        entry.delete(0, "end")
+        entry.insert(0, "nuovo testo")
+        save_btn = next(w for w in _walk(win)
+                        if isinstance(w, tk.Button) and w.cget("text") == "Salva")
+        save_btn.invoke()
+        assert saved.get("path") == str(txt)
+        assert txt.read_text(encoding="utf-8") == "[00:00 - 00:04] nuovo testo\n"
+    finally:
+        win.destroy()
