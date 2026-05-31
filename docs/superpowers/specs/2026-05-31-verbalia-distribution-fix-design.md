@@ -94,6 +94,53 @@ sopra). Per la GPU il bundle le contiene già.
 - README/Release: aggiornare il riferimento da `verbaLIA.zip` ai volumi
   `verbaLIA.7z.001/.002` + istruzioni di estrazione.
 
+### 4. Auto-configurazione runtime (no hardcoding)
+
+L'app deve girare bene su qualunque PC (oggi soprattutto il T1000 4 GB di Mirko,
+domani altri) adattandosi da sola, senza parametri cablati.
+
+- `decide_runtime_config(override)` (pura): legge GPU/VRAM/RAM/core e sceglie
+  device + precisione. Soglie come costanti regolabili (`VRAM_MIN_GB=4.0`,
+  `VRAM_COMFORTABLE_GB=4.8`), non valori hardware fissi.
+  - VRAM ≥ 4.8 → GPU + fp16 ("comoda"); 4.0–4.8 → GPU + fp16 ("memoria ridotta");
+    < 4.0 → CPU; nessuna NVIDIA → CPU.
+- Sostituito `fp16=False` cablato (3 punti) con la precisione scelta a runtime.
+- **Ripiego automatico GPU → CPU su out-of-memory**: se la VRAM finisce, ricarica
+  il modello su CPU e riprende, senza far fallire il lavoro (rimpiazza il vecchio
+  messaggio "prova Medium", motore non più presente in v3).
+- Il modello in cache viene **ricaricato se cambia il device** (override o ripiego).
+- **Override manuale** nel pannello: Automatico / Forza GPU / Forza CPU.
+
+### 5. App "parlante" + log di esecuzione
+
+- Ogni messaggio di stato mostrato all'utente viene anche scritto nel log
+  (`verbalia_debug.log`, accanto all'exe, con rotazione a ~2 MB).
+- Header di sessione nel log: versione, OS, CPU/RAM, GPU/VRAM, config scelta.
+- Errori loggati con **traceback completo** (`log_exception`), pensati per essere
+  inviati allo sviluppatore.
+- Pannello: pulsante "Apri log di esecuzione" che evidenzia il file in Esplora.
+
+## Esito audit (systematic-debugging, 2026-05-31)
+
+- Trovati e corretti alla radice 2 difetti nel nuovo codice:
+  - **A**: il modello in cache non si ricaricava al cambio di device → override e
+    ripiego ignorati al run successivo. Fix: tracking `self._model_device` + reload.
+  - **B**: il retry su CPU poteva duplicare l'output parziale → azzeramento del
+    file dal punto di resume prima del retry.
+- Test di regressione `tests/test_oom_fallback.py`: simula l'OOM e verifica
+  ripiego, reload su CPU, callback e assenza di duplicati. PASS.
+- Suite: 7/7 test rilevanti passano. 3 fallimenti **pre-esistenti** in
+  `test_preprocess.py` (chiama `preprocess_audio`, rimosso in v3): da ripulire,
+  non legati a queste modifiche.
+
+### Follow-up noti (non risolti, da decidere)
+
+- `diarize()` usa ancora `get_device()` (GPU) a prescindere dall'override/config:
+  la diarizzazione (opzionale, off di default) non segue ancora la scelta runtime.
+- La release conserva il vecchio `Sbobinator.zip` (v1): valutare se rimuoverlo.
+- README/note release da aggiornare ai volumi `verbaLIA.7z.001/.002`.
+- 3 test stantii in `test_preprocess.py` da rimuovere o riscrivere.
+
 ## Cosa NON facciamo (YAGNI)
 
 - Niente edizione CPU separata: Mirko ha bisogno della GPU (T1000), e la build

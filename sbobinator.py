@@ -6,6 +6,8 @@ import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
 import threading
 import warnings
+import platform
+import traceback
 
 warnings.filterwarnings("ignore")
 
@@ -64,6 +66,7 @@ MODEL_URL = "https://openaipublic.azureedge.net/main/whisper/models/e5b1a55b89c1
 MODEL_SIZE_GB = 2.9
 
 APP_NAME = "verbaLIA"
+APP_VERSION = "3.1"
 APP_SUBTITLE = "Trascrizione audio locale"
 
 # Palette dark moderna
@@ -87,6 +90,58 @@ def get_base_path():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+# ---------- Log di esecuzione ----------
+# File di log accanto all'eseguibile: registra ogni passo e i traceback completi
+# degli errori. Pensato per essere inviato allo sviluppatore per il debug.
+LOG_MAX_BYTES = 2_000_000   # ~2 MB poi ruota (.1) per non crescere all'infinito
+
+
+def get_log_path():
+    return os.path.join(get_base_path(), "verbalia_debug.log")
+
+
+def _log_write(text):
+    try:
+        path = get_log_path()
+        if os.path.isfile(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            try:
+                os.replace(path, path + ".1")
+            except Exception:
+                pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        pass
+
+
+def log_event(msg, level="INFO"):
+    """Una riga nel log di esecuzione, con timestamp e livello."""
+    _log_write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{level}] {msg}\n")
+
+
+def log_exception(context, exc):
+    """Logga un errore con il traceback completo (per il debug)."""
+    log_event(f"{context}: {exc}", level="ERROR")
+    _log_write(traceback.format_exc() + "\n")
+
+
+def log_session_header(config=None):
+    """Intestazione di sessione con hardware e configurazione scelta."""
+    _log_write("\n" + "=" * 66 + "\n")
+    log_event(f"verbaLIA {APP_VERSION} — nuova sessione")
+    try:
+        log_event(f"OS: {platform.platform()}")
+        sysinfo = get_system_info()
+        log_event(f"CPU: {sysinfo['cores']} core  ·  RAM: {sysinfo['ram_gb']} GB")
+        info = get_device_info()
+        log_event(f"GPU: {info['name']}  ·  VRAM: {info.get('vram_gb')} GB")
+    except Exception as e:
+        log_event(f"rilevamento hardware fallito: {e}", level="WARN")
+    if config:
+        log_event(f"Config runtime: device={config['device']} fp16={config['fp16']} "
+                  f"mode={config['mode']} — {config['reason']}")
 
 
 def get_models_dir():
@@ -179,6 +234,95 @@ def get_device_info():
             vram_gb = None
         return {"device": "cuda", "name": name, "vram_gb": vram_gb}
     return {"device": "cpu", "name": "CPU", "vram_gb": None}
+
+
+# Soglie di policy per la scelta automatica del runtime (VRAM in GB). NON sono
+# parametri hardware cablati: sono soglie regolabili usate solo come default
+# quando l'utente lascia "auto". large-v3 in fp16 pesa ~3,1 GB di pesi + overhead.
+VRAM_MIN_GB = 4.0          # sotto: large-v3 non entra in GPU → CPU
+VRAM_COMFORTABLE_GB = 4.8  # sopra: GPU "comoda"; tra MIN e questa: "memoria ridotta"
+
+
+def get_system_info():
+    """RAM totale (GB) e core logici, per la diagnostica. Best-effort."""
+    cores = os.cpu_count() or 0
+    ram_gb = None
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            class _MS(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            ms = _MS()
+            ms.dwLength = ctypes.sizeof(_MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms))
+            ram_gb = round(ms.ullTotalPhys / (1024 ** 3), 1)
+    except Exception:
+        ram_gb = None
+    return {"cores": cores, "ram_gb": ram_gb}
+
+
+def decide_runtime_config(override="auto"):
+    """Sceglie device, precisione e thread in base all'hardware rilevato.
+
+    override: "auto" (rileva), "gpu" (forza GPU se presente), "cpu" (forza CPU).
+    Funzione pura: nessun effetto collaterale, ritorna un dict descrittivo che
+    l'app usa per configurarsi e per mostrare cosa sta facendo. Niente valori
+    cablati: tutto deriva dall'hardware letto a runtime.
+    """
+    info = get_device_info()          # {device, name, vram_gb}
+    sysinfo = get_system_info()
+    has_cuda = info["device"] == "cuda"
+    vram = info.get("vram_gb")
+    name = info.get("name")
+
+    device, mode, reason = "cpu", "normale", ""
+
+    if override == "cpu":
+        device, reason = "cpu", "Forzato su CPU dall'utente."
+    elif override == "gpu":
+        if has_cuda:
+            device, mode, reason = "cuda", "forzata", "Forzato su GPU dall'utente."
+        else:
+            device, reason = "cpu", "GPU forzata ma nessuna NVIDIA rilevata: uso CPU."
+    else:  # auto
+        if has_cuda and vram is not None and vram >= VRAM_MIN_GB:
+            device = "cuda"
+            if vram >= VRAM_COMFORTABLE_GB:
+                mode = "comoda"
+                reason = f"{name} ({vram} GB VRAM): GPU + fp16."
+            else:
+                mode = "memoria ridotta"
+                reason = (f"{name} ({vram} GB VRAM, al limite per large-v3): provo "
+                          "GPU in fp16, ripiego su CPU se la memoria finisce.")
+        elif has_cuda:
+            device = "cpu"
+            reason = (f"{name} ({vram} GB VRAM): troppa poca memoria per large-v3, "
+                      "uso CPU.")
+        else:
+            device, reason = "cpu", "Nessuna GPU NVIDIA: uso CPU."
+
+    return {
+        "device": device,
+        "fp16": device == "cuda",
+        "threads": sysinfo["cores"] if device == "cpu" else None,
+        "mode": mode,
+        "reason": reason,
+        "vram_gb": vram,
+        "gpu_name": name if has_cuda else None,
+        "ram_gb": sysinfo["ram_gb"],
+        "cores": sysinfo["cores"],
+        "override": override,
+    }
 
 
 def gather_component_status():
@@ -355,8 +499,27 @@ def diarize(audio_path, num_speakers=None, on_status=None):
 
 def transcribe(audio_path, ui_callbacks, resume_from=0.0,
                diarize_on=False, num_speakers=None,
-               normalize_on=False, preloaded_model=None):
+               normalize_on=False, preloaded_model=None,
+               runtime_config=None, on_fallback=None):
     on_status, on_progress, on_segment, on_done = ui_callbacks
+
+    if runtime_config is None:
+        runtime_config = decide_runtime_config("auto")
+
+    # "Parlante": ogni messaggio di stato mostrato all'utente va anche nel log
+    # di esecuzione, così i passi compaiono sia nella UI sia nel file di debug.
+    _ui_on_status = on_status
+
+    def on_status(msg, level="INFO"):
+        try:
+            _ui_on_status(msg)
+        except Exception:
+            pass
+        log_event(msg, level=level)
+
+    log_event(f"--- Trascrizione: {os.path.basename(audio_path)}  "
+              f"(diar={diarize_on}, norm={normalize_on}, resume={resume_from:.0f}s, "
+              f"device={runtime_config['device']}, fp16={runtime_config['fp16']})")
 
     if normalize_on:
         try:
@@ -378,12 +541,16 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
             if not ok:
                 on_done(False, f"Errore download modello:\n{err}\n\nSe il PC non ha internet, copia large-v3.pt in models/.", None)
                 return
-        on_status("Caricamento modello in memoria...")
+        dev = runtime_config["device"]
+        on_status(f"Caricamento modello su {dev.upper()}"
+                  f"{' (fp16)' if runtime_config['fp16'] else ''}...")
         on_progress("Caricamento modello...", -1)
         try:
-            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(), device=get_device())
+            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(),
+                                       device=dev)
         except Exception as e:
             on_done(False, f"Errore caricamento modello:\n{e}\n\nIl file potrebbe essere corrotto. Cancella la cartella models/ e riscarica.", None)
+            log_exception("Caricamento modello fallito", e)
             return
 
     on_status("Analisi audio...")
@@ -446,6 +613,8 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
 
     try:
         out_file = open(out_path, "a" if resume_from > 0 else "w", encoding="utf-8")
+        out_file.seek(0, os.SEEK_END)
+        out_file_start = out_file.tell()   # punto da cui ripartire se serve azzerare
     except Exception as e:
         on_done(False, f"Non riesco a scrivere il file:\n{out_path}\n\nControlla i permessi della cartella.\n\n{e}", None)
         return
@@ -485,7 +654,7 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
         def flush(self):
             pass
 
-    transcribe_kwargs = dict(language=None, fp16=False, verbose=True)
+    transcribe_kwargs = dict(language=None, fp16=runtime_config["fp16"], verbose=True)
     if resume_from > 0:
         transcribe_kwargs["clip_timestamps"] = [float(resume_from)]
 
@@ -494,15 +663,48 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
     sys.stdout = _SegmentCapture()
     _wt.tqdm = _FakeTqdmModule
     try:
-        result = whisper.transcribe(model, audio_path, **transcribe_kwargs)
+        try:
+            result = whisper.transcribe(model, audio_path, **transcribe_kwargs)
+        except RuntimeError as e:
+            # Ripiego automatico GPU → CPU se la VRAM è insufficiente per large-v3
+            # (caso tipico: schede con poca memoria come la T1000 4 GB).
+            if "out of memory" in str(e).lower() and runtime_config["device"] == "cuda":
+                log_exception("Out-of-memory su GPU, ripiego automatico su CPU", e)
+                on_status("VRAM insufficiente per la GPU: passo alla CPU e riprovo...",
+                          level="WARN")
+                try:
+                    import torch
+                    del model
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                model = whisper.load_model(MODEL_NAME,
+                                           download_root=get_models_dir(), device="cpu")
+                runtime_config = dict(runtime_config, device="cpu", fp16=False,
+                                      mode="ripiego CPU")
+                transcribe_kwargs["fp16"] = False
+                # azzera l'eventuale output parziale del tentativo GPU fallito
+                # (preservando il prefisso del resume) per non duplicare segmenti
+                try:
+                    out_file.seek(out_file_start)
+                    out_file.truncate()
+                except Exception:
+                    pass
+                if on_fallback:
+                    try:
+                        on_fallback(model, runtime_config)
+                    except Exception:
+                        pass
+                result = whisper.transcribe(model, audio_path, **transcribe_kwargs)
+            else:
+                raise
     except RuntimeError as e:
-        if "out of memory" in str(e).lower() or "memory" in str(e).lower():
-            on_done(False, "Memoria insufficiente!\n\nProva col modello Medium che è più leggero.", None)
-        else:
-            on_done(False, f"Errore durante la sbobinatura:\n{e}", None)
+        on_done(False, f"Errore durante la sbobinatura:\n{e}", None)
+        log_exception(f"Trascrizione fallita: {os.path.basename(audio_path)}", e)
         return
     except Exception as e:
         on_done(False, f"Errore durante la sbobinatura:\n{e}", None)
+        log_exception(f"Trascrizione fallita: {os.path.basename(audio_path)}", e)
         return
     finally:
         sys.stdout = real_stdout
@@ -622,6 +824,9 @@ class App:
         self.queue_running = False
         self.stop_requested = False
         self.whisper_model = None      # caricato una volta sola, riusato per tutta la coda
+        self._model_device = None      # device su cui è caricato il modello in cache
+        self.device_override = tk.StringVar(value="auto")  # auto | gpu | cpu
+        self._runtime_config = None    # config scelta a inizio coda
 
         self._init_ttk_style()
         self._build_ui()
@@ -913,10 +1118,34 @@ class App:
         tk.Label(pad, text="Stato componenti", font=(FONT, 16, "bold"),
                  fg=TXT, bg=BG).pack(anchor="w")
 
-        info = get_device_info()
-        use = f"GPU · {info['name']}" if info["device"] == "cuda" else "CPU"
-        tk.Label(pad, text=f"Su questo PC la trascrizione userà: {use}",
-                 font=(FONT, 10), fg=TXT_MUTED, bg=BG).pack(anchor="w", pady=(2, 14))
+        cfg = decide_runtime_config(self.device_override.get())
+        dev_txt = (f"GPU · {cfg['gpu_name']}" if cfg["device"] == "cuda" else "CPU")
+        tk.Label(pad, text=f"Userà: {dev_txt}  ·  {cfg['mode']}",
+                 font=(FONT, 11, "bold"), fg=TXT, bg=BG).pack(anchor="w", pady=(2, 0))
+        tk.Label(pad, text=cfg["reason"], font=(FONT, 9), fg=TXT_MUTED, bg=BG,
+                 wraplength=500, justify="left").pack(anchor="w", pady=(0, 2))
+        if cfg.get("ram_gb"):
+            tk.Label(pad, text=f"Sistema: {cfg['cores']} core CPU · {cfg['ram_gb']} GB RAM",
+                     font=(FONT, 9), fg=TXT_MUTED, bg=BG).pack(anchor="w")
+
+        ov_row = tk.Frame(pad, bg=BG)
+        ov_row.pack(anchor="w", pady=(8, 14))
+        tk.Label(ov_row, text="Modalità:", font=(FONT, 9), fg=TXT_MUTED,
+                 bg=BG).pack(side="left", padx=(0, 8))
+        _ov_labels = {"auto": "Automatico", "gpu": "Forza GPU", "cpu": "Forza CPU"}
+        _ov_inv = {v: k for k, v in _ov_labels.items()}
+        ov_disp = tk.StringVar(value=_ov_labels[self.device_override.get()])
+        ov_cb = ttk.Combobox(ov_row, textvariable=ov_disp, state="readonly",
+                             style="Verb.TCombobox", width=14,
+                             values=list(_ov_labels.values()))
+        ov_cb.pack(side="left")
+
+        def _on_ov(_e=None):
+            self.device_override.set(_ov_inv[ov_disp.get()])
+            win.destroy()
+            self.show_components_ui()   # ricarica per riflettere la nuova scelta
+
+        ov_cb.bind("<<ComboboxSelected>>", _on_ov)
 
         for c in gather_component_status():
             if c["ok"]:
@@ -954,8 +1183,23 @@ class App:
                            kind="secondary").pack(anchor="w", padx=(26, 0),
                                                   pady=(8, 0))
 
-        FlatButton(pad, "Chiudi", win.destroy,
-                   kind="secondary").pack(anchor="e", pady=(14, 0))
+        btns = tk.Frame(pad, bg=BG)
+        btns.pack(fill="x", pady=(14, 0))
+        FlatButton(btns, "Apri log di esecuzione", self._open_log_folder,
+                   kind="secondary").pack(side="left")
+        FlatButton(btns, "Chiudi", win.destroy,
+                   kind="secondary").pack(side="right")
+
+    def _open_log_folder(self):
+        """Apre Esplora risorse evidenziando il file di log, da inviare per debug."""
+        path = get_log_path()
+        try:
+            if os.path.isfile(path):
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                os.startfile(get_base_path())
+        except Exception as e:
+            messagebox.showinfo(APP_NAME, f"Log in:\n{path}\n\n({e})")
 
     def download_model_ui(self):
         if model_exists():
@@ -1142,8 +1386,30 @@ class App:
         pending = [(i, it) for i, it in enumerate(self.items) if it.state == ST_PENDING]
         total = len(pending)
 
+        # Auto-configurazione in base all'hardware (o all'override scelto).
+        cfg = decide_runtime_config(self.device_override.get())
+        self._runtime_config = cfg
+        log_session_header(cfg)
+        self.root.after(0, self._set_status, f"Configurazione: {cfg['reason']}", ACCENT)
+
+        # Ricarica il modello se non è in cache o se il device scelto è cambiato
+        # (es. l'utente ha messo "Forza CPU", oppure si rivuole la GPU dopo un
+        # ripiego). Senza questo, un modello cachato sul device sbagliato verrebbe
+        # riusato ignorando la nuova scelta.
+        if self.whisper_model is not None and self._model_device != cfg["device"]:
+            prev = self._model_device
+            self.whisper_model = None
+            if prev == "cuda":
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
         if self.whisper_model is None:
-            self.root.after(0, self._set_status, "Caricamento modello in memoria...", ACCENT)
+            dev_lbl = "GPU" if cfg["device"] == "cuda" else "CPU"
+            self.root.after(0, self._set_status,
+                            f"Caricamento modello su {dev_lbl}...", ACCENT)
             self.root.after(0, self._set_progress, "Caricamento modello...", -1)
             try:
                 if not model_exists():
@@ -1153,14 +1419,17 @@ class App:
                     if not ok:
                         self.root.after(0, messagebox.showerror, APP_NAME,
                                         f"Download modello fallito:\n{err}")
+                        log_event(f"Download modello fallito: {err}", level="ERROR")
                         self.root.after(0, self._finish_queue)
                         return
                 import whisper
                 self.whisper_model = whisper.load_model(
-                    MODEL_NAME, download_root=get_models_dir(), device=get_device())
+                    MODEL_NAME, download_root=get_models_dir(), device=cfg["device"])
+                self._model_device = cfg["device"]
             except Exception as e:
                 self.root.after(0, messagebox.showerror, APP_NAME,
                                 f"Errore caricamento modello:\n{e}")
+                log_exception("Caricamento modello (coda) fallito", e)
                 self.root.after(0, self._finish_queue)
                 return
 
@@ -1211,25 +1480,23 @@ class App:
                                   else int(self.speakers_var.get())),
                     normalize_on=self.normalize_var.get(),
                     preloaded_model=self.whisper_model,
+                    runtime_config=self._runtime_config,
+                    on_fallback=self._on_device_fallback,
                 )
                 # transcribe ora è bloccante e chiama on_done internamente
                 done_event.wait(timeout=1)
             except Exception as e:
                 result_holder["ok"] = False
                 result_holder["info"] = str(e)
+                log_exception(f"Errore inatteso su {os.path.basename(it.path)}", e)
 
             if result_holder["ok"]:
+                log_event(f"OK: {os.path.basename(it.path)} trascritto")
                 self.root.after(0, self._update_item_state, idx, ST_DONE)
             else:
                 err_msg = result_holder.get("out") or result_holder.get("info") or "errore sconosciuto"
                 it.error = str(err_msg)
-                try:
-                    with open(os.path.join(get_base_path(), "verbalia_debug.log"),
-                              "a", encoding="utf-8") as logf:
-                        logf.write(f"\n--- {time.strftime('%H:%M:%S')} ---\n"
-                                   f"file: {it.path}\nerrore:\n{err_msg}\n")
-                except Exception:
-                    pass
+                log_event(f"ERRORE su {it.path}: {err_msg}", level="ERROR")
                 self.root.after(0, self._update_item_state, idx, ST_ERROR)
                 # mostra il primo errore SUBITO per capire cosa è successo
                 if not hasattr(self, "_first_err_shown"):
@@ -1238,6 +1505,16 @@ class App:
                                     f"Errore su {os.path.basename(it.path)}:\n\n{err_msg}")
 
         self.root.after(0, self._finish_queue)
+
+    def _on_device_fallback(self, new_model, new_cfg):
+        """Chiamato da transcribe quando ripiega su CPU per OOM: aggiorna il
+        modello in cache e la config, così i file successivi della coda usano
+        direttamente la CPU senza ritentare la GPU."""
+        self.whisper_model = new_model
+        self._model_device = new_cfg.get("device", "cpu")
+        self._runtime_config = new_cfg
+        self.root.after(0, self._set_status,
+                        "Passato a CPU: memoria GPU insufficiente per large-v3.", WARN)
 
     def _finish_queue(self):
         self.queue_running = False
@@ -1317,9 +1594,12 @@ def main():
                     sys.exit(1)
             print("Caricamento modello...")
             import whisper
-            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(), device=get_device())
+            cfg = decide_runtime_config("auto")
+            print(f"Device: {cfg['device']} (fp16={cfg['fp16']}) — {cfg['reason']}")
+            model = whisper.load_model(MODEL_NAME, download_root=get_models_dir(),
+                                       device=cfg["device"])
             print("Trascrizione in corso...")
-            result = model.transcribe(audio_path, language=None, fp16=False)
+            result = model.transcribe(audio_path, language=None, fp16=cfg["fp16"])
             out_path = os.path.splitext(audio_path)[0] + ".txt"
             with open(out_path, "w", encoding="utf-8") as f:
                 for seg in result["segments"]:
