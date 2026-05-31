@@ -463,6 +463,49 @@ def format_line(seg, label_map):
     return f"{ts} {text}"
 
 
+def regroup_sentences(result, max_chars=240, max_gap=0.8):
+    """Ricuce i segmenti grezzi di Whisper in frasi intere usando i timestamp di
+    parola (richiede word_timestamps=True). Taglia su uno di questi confini:
+    fine frase (. ? ! …), una pausa nel parlato più lunga di max_gap secondi
+    (confine naturale, utile quando il modello non punteggia), o max_chars (evita
+    muri di testo). Ritorna [{start, end, text}]. Senza word timestamps torna ai
+    segmenti grezzi.
+    """
+    words = []
+    for seg in result.get("segments", []):
+        for w in seg.get("words", []):
+            wt = w.get("word", "")
+            if wt:
+                words.append((w.get("start"), w.get("end"), wt))
+    if not words:
+        return [{"start": s["start"], "end": s["end"], "text": s["text"].strip()}
+                for s in result.get("segments", []) if s.get("text", "").strip()]
+
+    out, buf, start, prev_end = [], [], None, None
+
+    def emit(end):
+        out.append({"start": float(start if start is not None else 0.0),
+                    "end": float(end if end is not None else (start or 0.0)),
+                    "text": "".join(buf).strip()})
+
+    for ws, we, wt in words:
+        # confine naturale: pausa lunga prima di questa parola
+        if buf and prev_end is not None and ws is not None and (ws - prev_end) > max_gap:
+            emit(prev_end)
+            buf, start = [], None
+        if start is None:
+            start = ws if ws is not None else (prev_end or 0.0)
+        buf.append(wt)
+        prev_end = we if we is not None else prev_end
+        text = "".join(buf).strip()
+        if text.endswith((".", "?", "!", "…")) or len(text) >= max_chars:
+            emit(we)
+            buf, start = [], None
+    if buf:
+        emit(prev_end)
+    return out
+
+
 def diarize(audio_path, num_speakers=None, on_status=None, device=None):
     """Diarization offline. Ritorna [(start, end, label)].
 
@@ -656,7 +699,18 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
         def flush(self):
             pass
 
-    transcribe_kwargs = dict(language=None, fp16=runtime_config["fp16"], verbose=True)
+    # word_timestamps: timestamp di parola → ricucitura per frase + boundary
+    # accurati. hallucination_silence_threshold: salta i silenzi dove il modello
+    # tende ad allucinare (richiede word_timestamps). NB: lasciamo
+    # condition_on_previous_text al default (True): disattivarlo riduce le
+    # allucinazioni-loop ma toglie punteggiatura e peggiora la segmentazione
+    # (verificato su audio reale), mentre i loop sono già coperti dagli altri
+    # threshold (compression_ratio, temperature fallback).
+    transcribe_kwargs = dict(
+        language=None, fp16=runtime_config["fp16"], verbose=True,
+        word_timestamps=True,
+        hallucination_silence_threshold=2.0,
+    )
     if resume_from > 0:
         transcribe_kwargs["clip_timestamps"] = [float(resume_from)]
 
@@ -731,6 +785,20 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
         except Exception as e:
             on_status(f"Voci non riconosciute: {e}", level="WARN")
             log_exception("Diarizzazione fallita", e)
+
+    elif resume_from == 0:
+        # Senza diarizzazione: ricuci i segmenti grezzi (mostrati live, spezzettati)
+        # in frasi intere usando i timestamp di parola, e riscrivi il file pulito.
+        # Solo a inizio file; con il resume si tiene l'incrementale già scritto.
+        try:
+            sentences = regroup_sentences(result)
+            if sentences:
+                with open(out_path, "w", encoding="utf-8") as f:
+                    for seg in sentences:
+                        f.write(format_line(seg, {}) + "\n")
+                on_segment("__RELOAD__")
+        except Exception as e:
+            log_exception("Ricucitura per frase fallita", e)
 
     # Il file è già stato scritto in modo incrementale durante la trascrizione.
     elapsed = time.time() - start_time
