@@ -56,4 +56,9 @@ jobs:
           $parts = Get-ChildItem verbaLIA.7z.* | Select-Object -ExpandProperty Name
           Write-Host "Carico sulla release: $($parts -join ', ')"
           gh release upload v1.0 $parts --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Upload dei volumi fallito" }
+          # Rimuove il vecchio bundle v1 ormai obsoleto (best-effort: ignora se assente)
+          gh release delete-asset v1.0 Sbobinator.zip -y
+          Write-Host "Pulizia asset obsoleti completata"
+          exit 0
         shell: pwsh

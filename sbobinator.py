@@ -463,12 +463,14 @@ def format_line(seg, label_map):
     return f"{ts} {text}"
 
 
-def diarize(audio_path, num_speakers=None, on_status=None):
-    """Diarization offline su CPU. Ritorna [(start, end, label)].
+def diarize(audio_path, num_speakers=None, on_status=None, device=None):
+    """Diarization offline. Ritorna [(start, end, label)].
 
     Usa pyannote 4.x. L'audio viene caricato in memoria col ffmpeg di whisper
     (evita torchcodec). I modelli sono caricati dalla cache locale (offline);
     nella build congelata stanno in 'hf_models/' dentro il bundle.
+
+    device: "cuda"/"cpu" coerente con la scelta runtime; se None usa get_device().
     """
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -485,7 +487,7 @@ def diarize(audio_path, num_speakers=None, on_status=None):
     from pyannote.audio import Pipeline
 
     pipe = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
-    pipe.to(torch.device(get_device()))
+    pipe.to(torch.device(device or get_device()))
 
     audio = whisper.audio.load_audio(audio_path)  # float32 mono @ 16 kHz
     waveform = torch.from_numpy(audio).unsqueeze(0)
@@ -718,7 +720,8 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
     # poi riscriviamo il file con le etichette e ricarichiamo la finestra.
     if diarize_on:
         try:
-            turns = diarize(audio_path, num_speakers=num_speakers, on_status=on_status)
+            turns = diarize(audio_path, num_speakers=num_speakers,
+                            on_status=on_status, device=runtime_config["device"])
             segs = assign_speakers(result["segments"], turns)
             label_map = speaker_label_map(segs)
             with open(out_path, "w", encoding="utf-8") as f:
@@ -726,7 +729,8 @@ def transcribe(audio_path, ui_callbacks, resume_from=0.0,
                     f.write(format_line(seg, label_map) + "\n")
             on_segment("__RELOAD__")
         except Exception as e:
-            on_status(f"Voci non riconosciute: {e}")
+            on_status(f"Voci non riconosciute: {e}", level="WARN")
+            log_exception("Diarizzazione fallita", e)
 
     # Il file è già stato scritto in modo incrementale durante la trascrizione.
     elapsed = time.time() - start_time
