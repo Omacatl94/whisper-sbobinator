@@ -181,6 +181,53 @@ def get_device_info():
     return {"device": "cpu", "name": "CPU", "vram_gb": None}
 
 
+def gather_component_status():
+    """Stato dei componenti per il pannello diagnostica.
+
+    Funzione pura (nessuna UI) così è testabile a parte. Ritorna una lista di
+    dict con: key, label, what (a cosa serve), ok (bool), detail, neutral
+    (assenza non è un errore, es. GPU su un PC senza NVIDIA).
+    """
+    items = []
+    items.append({
+        "key": "ffmpeg",
+        "label": "ffmpeg",
+        "what": "Converte e legge i file audio/video. Necessario.",
+        "ok": check_ffmpeg(),
+        "detail": "",
+        "neutral": False,
+    })
+
+    mok = model_exists()
+    items.append({
+        "key": "model",
+        "label": "Modello Whisper large-v3",
+        "what": "Il motore della trascrizione. Obbligatorio.",
+        "ok": mok,
+        "detail": "Pronto" if mok else f"Assente — scaricalo (~{MODEL_SIZE_GB:.1f} GB)",
+        "neutral": False,
+    })
+
+    info = get_device_info()
+    gpu_ok = info["device"] == "cuda"
+    if gpu_ok:
+        vram = f", {info['vram_gb']} GB VRAM" if info.get("vram_gb") else ""
+        detail = f"{info['name']}{vram}"
+    else:
+        detail = "Nessuna GPU NVIDIA rilevata su questo PC → uso la CPU"
+    items.append({
+        "key": "gpu",
+        "label": "Accelerazione GPU (NVIDIA / CUDA)",
+        "what": "Velocizza molto la trascrizione sui PC con scheda NVIDIA. "
+                "Opzionale: senza, l'app usa la CPU. Le librerie CUDA sono già "
+                "incluse nell'app, non serve scaricare nulla.",
+        "ok": gpu_ok,
+        "detail": detail,
+        "neutral": not gpu_ok,
+    })
+    return items
+
+
 def download_model(progress_callback):
     import urllib.request
 
@@ -663,6 +710,11 @@ class App:
         # configure smaller padding for header context
         self.download_btn.configure(padx=12, pady=6, font=(FONT, 9))
 
+        self.status_btn = FlatButton(right, "Stato componenti",
+                                     self.show_components_ui, kind="secondary")
+        self.status_btn.configure(padx=12, pady=6, font=(FONT, 9))
+        self.status_btn.pack(anchor="e", pady=(6, 0))
+
     def _build_options(self, parent):
         card = tk.Frame(parent, bg=SURFACE,
                         highlightthickness=1, highlightbackground=BORDER)
@@ -845,6 +897,65 @@ class App:
                 self.download_btn.pack(anchor="e", pady=(6, 0))
             except Exception:
                 pass
+
+    def show_components_ui(self):
+        """Pannello diagnostica: cosa è installato e cosa userà l'app."""
+        win = tk.Toplevel(self.root)
+        win.title(f"{APP_NAME} — Stato componenti")
+        win.configure(bg=BG)
+        win.geometry("560x500")
+        win.minsize(480, 420)
+        win.transient(self.root)
+
+        pad = tk.Frame(win, bg=BG, padx=20, pady=18)
+        pad.pack(fill="both", expand=True)
+
+        tk.Label(pad, text="Stato componenti", font=(FONT, 16, "bold"),
+                 fg=TXT, bg=BG).pack(anchor="w")
+
+        info = get_device_info()
+        use = f"GPU · {info['name']}" if info["device"] == "cuda" else "CPU"
+        tk.Label(pad, text=f"Su questo PC la trascrizione userà: {use}",
+                 font=(FONT, 10), fg=TXT_MUTED, bg=BG).pack(anchor="w", pady=(2, 14))
+
+        for c in gather_component_status():
+            if c["ok"]:
+                mark, col = "✓", OK
+            elif c.get("neutral"):
+                mark, col = "•", TXT_MUTED
+            else:
+                mark, col = "✗", WARN
+
+            card = tk.Frame(pad, bg=SURFACE,
+                            highlightthickness=1, highlightbackground=BORDER)
+            card.pack(fill="x", pady=4)
+            inner = tk.Frame(card, bg=SURFACE, padx=14, pady=10)
+            inner.pack(fill="x")
+
+            head = tk.Frame(inner, bg=SURFACE)
+            head.pack(fill="x")
+            tk.Label(head, text=mark, font=(FONT, 12, "bold"),
+                     fg=col, bg=SURFACE, width=2).pack(side="left")
+            tk.Label(head, text=c["label"], font=(FONT, 11, "bold"),
+                     fg=TXT, bg=SURFACE).pack(side="left")
+
+            if c.get("detail"):
+                tk.Label(inner, text=c["detail"], font=(FONT, 9),
+                         fg=(TXT_MUTED if c["ok"] else col), bg=SURFACE,
+                         wraplength=480, justify="left").pack(
+                             anchor="w", padx=(26, 0))
+            tk.Label(inner, text=c["what"], font=(FONT, 9),
+                     fg=TXT_MUTED, bg=SURFACE, wraplength=480,
+                     justify="left").pack(anchor="w", padx=(26, 0), pady=(2, 0))
+
+            if c["key"] == "model" and not c["ok"]:
+                FlatButton(inner, "Scarica modello",
+                           lambda w=win: (w.destroy(), self.download_model_ui()),
+                           kind="secondary").pack(anchor="w", padx=(26, 0),
+                                                  pady=(8, 0))
+
+        FlatButton(pad, "Chiudi", win.destroy,
+                   kind="secondary").pack(anchor="e", pady=(14, 0))
 
     def download_model_ui(self):
         if model_exists():

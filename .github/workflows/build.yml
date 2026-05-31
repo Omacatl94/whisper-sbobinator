@@ -33,21 +33,27 @@ jobs:
           Copy-Item $ffmpegExe.FullName -Destination dist/ffmpeg.exe
         shell: pwsh
 
-      - name: Create bundle zip
+      - name: Create split bundle
+        # Volumi 7z da 1800 MiB: l'asset GitHub ha un limite di 2 GiB per file e
+        # il bundle cu128 pesa ~3 GB. Produce verbaLIA.7z.001, verbaLIA.7z.002...
         run: |
           cd dist
-          7z a ../verbaLIA.zip verbaLIA.exe ffmpeg.exe
+          7z a -v1800m ../verbaLIA.7z verbaLIA.exe ffmpeg.exe
         shell: pwsh
 
       - name: Upload bundle
         uses: actions/upload-artifact@v4
         with:
           name: verbaLIA
-          path: verbaLIA.zip
+          path: verbaLIA.7z.*
           retention-days: 30
 
       - name: Publish to release v1.0
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload v1.0 verbaLIA.zip --clobber
+        # Carica tutti i volumi (.001, .002, ...) sostituendo quelli esistenti.
+        run: |
+          $parts = Get-ChildItem verbaLIA.7z.* | Select-Object -ExpandProperty Name
+          Write-Host "Carico sulla release: $($parts -join ', ')"
+          gh release upload v1.0 $parts --clobber
         shell: pwsh
